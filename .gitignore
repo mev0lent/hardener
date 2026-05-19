@@ -1,0 +1,11 @@
+Hardener
+hardener
+hardener-linux
+hardener-macos
+hardener-macos-arm64
+reports/
+runs.json
+testing/results/
+testing/.vagrant/
+.idea/
+*.yaml

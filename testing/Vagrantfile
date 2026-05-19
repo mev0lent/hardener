@@ -1,0 +1,65 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# =============================================================================
+# Vagrantfile — Hardener cross-distro test VMs (libvirt/KVM)
+# =============================================================================
+
+# Updated pkg_cmd with non-interactive flags to prevent Postfix hangs
+DISTROS = {
+  "ubuntu"    => { box: "bento/ubuntu-24.04",  pkg_cmd: "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ufw openssh-server auditd aide" },
+  "debian"    => { box: "generic/debian12",    pkg_cmd: "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ufw openssh-server auditd aide" },
+  "rocky"     => { box: "bento/rockylinux-9",  pkg_cmd: "dnf install -y firewalld openssh-server audit aide" },
+  "opensuse"  => { box: "opensuse/Leap-15.6.x86_64", pkg_cmd: "zypper --non-interactive install firewalld openssh audit aide" },
+  "archlinux" => { box: "generic/arch",        pkg_cmd: "pacman -Sy --noconfirm archlinux-keyring && pacman -Syu --noconfirm ufw openssh audit" },
+  "rhel" => { box: "generic/rhel9", pkg_cmd: "dnf install -y epel-release && dnf makecache && dnf install -y firewalld openssh-server audit" },
+  "fedora"    => { box: "bento/fedora-latest",  pkg_cmd: "dnf install -y firewalld openssh-server audit aide" },
+}
+
+Vagrant.configure("2") do |config|
+
+  config.vm.provider :libvirt do |lv|
+    lv.memory = 1024
+    lv.cpus   = 2
+  end
+
+  # WORKAROUND FOR USB DRIVE (exFAT):
+  # Prevents Vagrant from replacing the insecure key with a new one.
+  # This avoids the "chmod 0600" failure on filesystems that don't support permissions.
+  config.ssh.insert_key = false
+
+  # Rsync the staging directory into each VM
+  config.vm.synced_folder ".staging", "/opt/hardener",
+    type: "rsync",
+    rsync__exclude: [".git/", "results/"]
+
+  DISTROS.each do |name, opts|
+    config.vm.define name, autostart: false do |node|
+      node.vm.box = opts[:box]
+      node.vm.hostname = "hardener-#{name}"
+
+      # Step 1: Install distro-specific prerequisites
+      node.vm.provision "prereqs", type: "shell", inline: <<-SHELL
+        set -e
+        echo "Installing prerequisites for #{name}..."
+        #{opts[:pkg_cmd]}
+      SHELL
+
+      # Step 2: Prepare the test environment
+      node.vm.provision "setup", type: "shell", inline: <<-SHELL
+        set -e
+        # Note: If the host is exFAT, chmod here only affects the GUEST filesystem
+        chmod +x /opt/hardener/hardener /opt/hardener/entrypoint.sh
+        mkdir -p /tmp/results
+      SHELL
+
+      # Step 3: Run the full test cycle
+      node.vm.provision "test", type: "shell", inline: <<-SHELL
+        set -e
+        export DISTRO_NAME="#{name}"
+        export SECURITY_LEVEL="${SECURITY_LEVEL:-baseline}"
+        bash /opt/hardener/entrypoint.sh
+      SHELL
+    end
+  end
+end
