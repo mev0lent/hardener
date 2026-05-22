@@ -7,10 +7,18 @@
 set -uo pipefail
 
 HARDENER="/opt/hardener/hardener"
-GUIDE_PATH="/opt/hardener/guide"
 RESULTS_DIR="/tmp/results"
 DISTRO="${DISTRO_NAME:-unknown}"
 SECURITY_LEVEL="${SECURITY_LEVEL:-baseline}"
+
+# Auto-detect input mode from what run_tests.sh staged
+if [ -f "/opt/hardener/ruleset.yaml" ]; then
+    HARDENER_INPUT="--ruleset /opt/hardener/ruleset.yaml"
+    INPUT_DESC="ruleset: /opt/hardener/ruleset.yaml"
+else
+    HARDENER_INPUT="--path /opt/hardener/guide"
+    INPUT_DESC="guide: /opt/hardener/guide"
+fi
 
 mkdir -p "$RESULTS_DIR"
 
@@ -115,23 +123,26 @@ EOF
     exit 1
 fi
 
-if [ ! -d "$GUIDE_PATH" ]; then
-    echo "FATAL: guide directory $GUIDE_PATH not found" | tee -a "$LOG"
+if [ -f "/opt/hardener/ruleset.yaml" ]; then
+    SUITE_FILES=$(grep -c '^title:' /opt/hardener/ruleset.yaml 2>/dev/null || echo 0)
+    echo "Found $SUITE_FILES suite(s) in ruleset" | tee -a "$LOG"
+elif [ -d "/opt/hardener/guide" ]; then
+    SUITE_FILES=$(find /opt/hardener/guide -name '*.md' -exec grep -l 'checksuites:' {} + 2>/dev/null | wc -l)
+    echo "Found $SUITE_FILES guide files with checksuites" | tee -a "$LOG"
+else
+    echo "FATAL: neither /opt/hardener/ruleset.yaml nor /opt/hardener/guide found" | tee -a "$LOG"
     cat > "$REPORT" <<EOF
-{ "distro": "$DISTRO", "timestamp": "$(ts)", "error": "guide directory not found" }
+{ "distro": "$DISTRO", "timestamp": "$(ts)", "error": "no input staged (guide directory or ruleset.yaml)" }
 EOF
     exit 1
 fi
-
-SUITE_FILES=$(find "$GUIDE_PATH" -name '*.md' -exec grep -l 'checksuites:' {} + 2>/dev/null | wc -l)
-echo "Found $SUITE_FILES guide files with checksuites" | tee -a "$LOG"
 
 # ── step 1: initial audit ────────────────────────────────────────────────────
 
 echo ""
 echo "▶ STEP 1/5: Initial Audit"
 run_step "01-audit-initial" \
-    "$HARDENER" audit --path "$GUIDE_PATH" --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
 AUDIT1_RC=$_STEP_RC
 AUDIT1_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
 echo "  Exit code: $AUDIT1_RC"
@@ -141,7 +152,7 @@ echo "  Exit code: $AUDIT1_RC"
 echo ""
 echo "▶ STEP 2/5: Fix"
 run_step "02-fix" \
-    "$HARDENER" fix --path "$GUIDE_PATH" --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" fix $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
 FIX_RC=$_STEP_RC
 FIX_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
 echo "  Exit code: $FIX_RC"
@@ -151,7 +162,7 @@ echo "  Exit code: $FIX_RC"
 echo ""
 echo "▶ STEP 3/5: Post-Fix Audit"
 run_step "03-audit-postfix" \
-    "$HARDENER" audit --path "$GUIDE_PATH" --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
 AUDIT2_RC=$_STEP_RC
 AUDIT2_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
 echo "  Exit code: $AUDIT2_RC"
@@ -170,7 +181,7 @@ echo "  Exit code: $ROLLBACK_RC"
 echo ""
 echo "▶ STEP 5/5: Post-Rollback Audit"
 run_step "05-audit-postrollback" \
-    "$HARDENER" audit --path "$GUIDE_PATH" --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
 AUDIT3_RC=$_STEP_RC
 AUDIT3_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
 echo "  Exit code: $AUDIT3_RC"

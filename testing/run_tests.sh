@@ -3,17 +3,19 @@
 # run_tests.sh: Hardener cross-distro test orchestrator (Vagrant/libvirt)
 #
 # Usage:
-#   ./run_tests.sh --guide PATH --binary PATH [--level LEVEL] [--distros "d1 d2"]
+#   ./run_tests.sh --guide PATH   --binary PATH [--level LEVEL] [--distros "d1 d2"]
+#   ./run_tests.sh --ruleset FILE --binary PATH [--level LEVEL] [--distros "d1 d2"]
 #
 # Prerequisites:
 #   - Vagrant 2.4+ with vagrant-libvirt plugin
 #   - libvirt/KVM running (virt-host-validate should pass)
-#   - Go toolchain (only if --binary not provided)
+#   - Go toolchain (only if --binary not provided and using --guide)
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GUIDE_PATH=""
+RULESET_PATH=""
 BINARY_PATH=""
 SECURITY_LEVEL="baseline"
 DISTROS="ubuntu debian rocky opensuse archlinux"
@@ -25,12 +27,13 @@ TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --guide)    GUIDE_PATH="$2";     shift 2 ;;
-        --binary)   BINARY_PATH="$2";    shift 2 ;;
+        --guide)    GUIDE_PATH="$2";    shift 2 ;;
+        --ruleset)  RULESET_PATH="$2";  shift 2 ;;
+        --binary)   BINARY_PATH="$2";   shift 2 ;;
         --level)    SECURITY_LEVEL="$2"; shift 2 ;;
-        --distros)  DISTROS="$2";        shift 2 ;;
+        --distros)  DISTROS="$2";       shift 2 ;;
         --help|-h)
-            echo "Usage: $0 --guide PATH --binary PATH [--level baseline|high] [--distros \"d1 d2\"]"
+            echo "Usage: $0 (--guide PATH | --ruleset FILE) --binary PATH [--level baseline|high] [--distros \"d1 d2\"]"
             exit 0 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -38,11 +41,17 @@ done
 
 # ── validation ───────────────────────────────────────────────────────────────
 
-if [ -z "$GUIDE_PATH" ]; then
-    echo "ERROR: --guide is required"; exit 1
+if [ -z "$GUIDE_PATH" ] && [ -z "$RULESET_PATH" ]; then
+    echo "ERROR: one of --guide or --ruleset is required"; exit 1
 fi
-if [ ! -d "$GUIDE_PATH" ]; then
+if [ -n "$GUIDE_PATH" ] && [ -n "$RULESET_PATH" ]; then
+    echo "ERROR: --guide and --ruleset are mutually exclusive"; exit 1
+fi
+if [ -n "$GUIDE_PATH" ] && [ ! -d "$GUIDE_PATH" ]; then
     echo "ERROR: guide directory not found: $GUIDE_PATH"; exit 1
+fi
+if [ -n "$RULESET_PATH" ] && [ ! -f "$RULESET_PATH" ]; then
+    echo "ERROR: ruleset file not found: $RULESET_PATH"; exit 1
 fi
 if ! command -v vagrant >/dev/null 2>&1; then
     echo "ERROR: vagrant not found in PATH"; exit 1
@@ -53,28 +62,38 @@ fi
 
 # ── stage files ──────────────────────────────────────────────────────────────
 
+INPUT_LABEL="${GUIDE_PATH:-$RULESET_PATH}"
+
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  Hardener Cross-Distro Test Runner (Vagrant/libvirt)"
 echo "║  $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-echo "║  Guide:    $GUIDE_PATH"
+echo "║  Input:    $INPUT_LABEL"
 echo "║  Level:    $SECURITY_LEVEL"
 echo "║  Distros:  $DISTROS"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
 rm -rf "$STAGING_DIR"
-mkdir -p "$STAGING_DIR/guide" "$RESULTS_DIR/$TIMESTAMP"
+mkdir -p "$STAGING_DIR" "$RESULTS_DIR/$TIMESTAMP"
 
-# Copy guide
-cp -r "$GUIDE_PATH"/. "$STAGING_DIR/guide/"
+# Stage input: either a guide directory or a single ruleset yaml
+if [ -n "$GUIDE_PATH" ]; then
+    mkdir -p "$STAGING_DIR/guide"
+    cp -r "$GUIDE_PATH"/. "$STAGING_DIR/guide/"
+else
+    cp "$RULESET_PATH" "$STAGING_DIR/ruleset.yaml"
+fi
 
 # Copy entrypoint
 cp "$SCRIPT_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
 
-# Binary: use provided or compile
+# Binary: use provided or compile (auto-compile only supported in guide mode)
 if [ -n "$BINARY_PATH" ] && [ -f "$BINARY_PATH" ]; then
     echo "Using provided binary: $BINARY_PATH"
     cp "$BINARY_PATH" "$STAGING_DIR/hardener"
+elif [ -n "$RULESET_PATH" ]; then
+    echo "ERROR: --binary is required when using --ruleset (no source directory to compile from)"
+    exit 1
 else
     echo "No --binary provided, compiling for linux/amd64..."
     HARDENER_SRC=$(find "$(dirname "$GUIDE_PATH")/.." -name "go.mod" -maxdepth 3 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)

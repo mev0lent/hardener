@@ -192,18 +192,28 @@ vagrant plugin list   # should list vagrant-libvirt
 ```bash
 cd testing
 
+# With a markdown guide directory
 ./run_tests.sh \
-  --guide  path/to/linux-guide/sections \
-  --binary /tmp/hardener-linux \
+  --guide   path/to/linux-guide/sections \
+  --binary  /tmp/hardener-linux \
+  --distros "ubuntu debian rocky opensuse archlinux"
+
+# With a standalone ruleset YAML (--binary required)
+./run_tests.sh \
+  --ruleset path/to/ruleset.yaml \
+  --binary  /tmp/hardener-linux \
   --distros "ubuntu debian rocky opensuse archlinux"
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--guide` | *(required)* | Path to the directory containing the guide `.md` files |
-| `--binary` | *(required)* | Path to the pre-built hardener binary |
+| `--guide` | | Path to a hardening-guide directory of `.md` files |
+| `--ruleset` | | Path to a standalone `ruleset.yaml` (alternative to `--guide`) |
+| `--binary` | *(required with `--ruleset`)* | Path to the pre-built hardener binary |
 | `--level` | `baseline` | Security level: `baseline` or `high` |
 | `--distros` | all | Space-separated list of distros to run |
+
+`--guide` and `--ruleset` are mutually exclusive; one must be provided.
 
 ### Docker (Windows / macOS / VM hosts)
 
