@@ -155,30 +155,26 @@ BIOS/UEFI; inside a VM this setup cannot be used, use Docker instead.
 
 **2. Install Vagrant**
 
-The distro package is often outdated. Install from the HashiCorp apt repo:
+Follow the official instructions at <https://developer.hashicorp.com/vagrant/install>:
 
 ```bash
-# Resolve the correct apt suite.
-# Kali Linux returns "kali-rolling" which has no HashiCorp entry; fall back to bookworm.
-CODENAME=$(lsb_release -cs)
-
-[ "$CODENAME" = "kali-rolling" ] && CODENAME="bookworm"
-```
-
-```bash
-# Download the key to a temp file first — piping wget directly into sudo gpg
-# swallows the sudo password prompt because stdin is already occupied by the pipe.
-wget -O /tmp/hashicorp.gpg https://apt.releases.hashicorp.com/gpg
-sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg /tmp/hashicorp.gpg
-rm /tmp/hashicorp.gpg
+wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
 
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
-  https://apt.releases.hashicorp.com ${CODENAME} main" \
+  https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" \
   | sudo tee /etc/apt/sources.list.d/hashicorp.list
 
 sudo apt update && sudo apt install vagrant
 vagrant --version   # should print 2.4+
 ```
+
+> **Kali Linux:** `lsb_release -cs` returns `kali-rolling` which has no entry in the HashiCorp repo.
+> Replace the codename part of the `echo` line with a hardcoded `bookworm` (Kali's Debian base):
+> ```bash
+> echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+>   https://apt.releases.hashicorp.com bookworm main" \
+>   | sudo tee /etc/apt/sources.list.d/hashicorp.list
+> ```
 
 **3. Install the vagrant-libvirt plugin**
 
