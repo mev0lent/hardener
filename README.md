@@ -18,7 +18,7 @@ A cross-platform security auditing and hardening tool. Load a ruleset, run an au
 **2. Build the binary**
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/mev0lent/hardener.git
 cd hardener
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-linux .
 ```
@@ -69,7 +69,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-linux .
 **2. Build the binary**
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/mev0lent/hardener.git
 cd hardener
 
 # Apple Silicon
