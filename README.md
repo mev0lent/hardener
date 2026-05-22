@@ -4,6 +4,26 @@ A cross-platform security auditing and hardening tool. Load a ruleset, run an au
 
 ---
 
+## Prerequisites
+
+**Go 1.24+** is required to build the binary. The `golang-go` package in most distro
+repos is too old — install from the official source instead:
+
+```bash
+GO_VERSION=$(curl -s https://go.dev/VERSION?m=text | head -1)
+curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile
+source ~/.profile
+go version
+```
+
+> **macOS:** use `darwin-arm64` or `darwin-amd64` instead of `linux-amd64` in the URL above,
+> or install via `brew install go`.
+
+---
+
 ## Quick Start
 
 ### Linux
@@ -188,7 +208,7 @@ vagrant plugin list   # should list vagrant-libvirt
 
 **4. Run the tests**
 
-Build the binary first from the repo root (same binary as the Quick Start — no need for a separate `/tmp` copy):
+Build the binary from the repo root (Go 1.24+ required, see Prerequisites above):
 
 ```bash
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-linux .
