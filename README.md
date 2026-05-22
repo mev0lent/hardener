@@ -7,7 +7,7 @@ A cross-platform security auditing and hardening tool. Load a ruleset, run an au
 ## Prerequisites
 
 **Go 1.24+** is required to build the binary. The `golang-go` package in most distro
-repos is too old — install from the official source instead:
+repos is too old; install from the official source instead:
 
 ```bash
 GO_VERSION=$(curl -s https://go.dev/VERSION?m=text | head -1)
@@ -169,7 +169,7 @@ virt-host-validate
 ```
 
 `IOMMU` and secure-guest `WARN` lines are fine. A `FAIL` on the **KVM** line means
-hardware virtualisation is not available — on bare metal, enable VT-x/AMD-V in
+hardware virtualisation is not available; on bare metal, enable VT-x/AMD-V in
 BIOS/UEFI; inside a VM this setup cannot be used, use Docker instead.
 
 **2. Install Vagrant**
@@ -299,11 +299,11 @@ Summary table columns:
 
 ### Troubleshooting
 
-**Distro shows `SKIP`** — open `<distro>-vagrant.log`. Common causes: box has no libvirt provider variant; package install failed during provisioning.
+**Distro shows `SKIP`**: open `<distro>-vagrant.log`. Common causes: box has no libvirt provider variant; package install failed during provisioning.
 
-**All results are zero** — the binary failed system validation. Open `<distro>.log` and look for `[> ERROR]` lines. Usually a required tool from preconditions is missing on that distro.
+**All results are zero**: the binary failed system validation. Open `<distro>.log` and look for `[> ERROR]` lines. Usually a required tool from preconditions is missing on that distro.
 
-**`vagrant plugin install` fails** — install dev libraries first:
+**`vagrant plugin install` fails**: install dev libraries first:
 
 ```bash
 sudo apt install libvirt-dev ruby-dev build-essential
