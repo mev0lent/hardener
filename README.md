@@ -161,10 +161,16 @@ The distro package is often outdated. Install from the HashiCorp apt repo:
 # Resolve the correct apt suite.
 # Kali Linux returns "kali-rolling" which has no HashiCorp entry; fall back to bookworm.
 CODENAME=$(lsb_release -cs)
-[ "$CODENAME" = "kali-rolling" ] && CODENAME="bookworm"
 
-wget -O - https://apt.releases.hashicorp.com/gpg \
-  | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+[ "$CODENAME" = "kali-rolling" ] && CODENAME="bookworm"
+```
+
+```bash
+# Download the key to a temp file first — piping wget directly into sudo gpg
+# swallows the sudo password prompt because stdin is already occupied by the pipe.
+wget -O /tmp/hashicorp.gpg https://apt.releases.hashicorp.com/gpg
+sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg /tmp/hashicorp.gpg
+rm /tmp/hashicorp.gpg
 
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
   https://apt.releases.hashicorp.com ${CODENAME} main" \
