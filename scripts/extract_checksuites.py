@@ -115,10 +115,7 @@ def extract(sections_dir: str, output_file: str) -> None:
         if arch_val:
             doc["arch"] = arch_val
 
-        # preconditions from preamble apply to every suite
-        if preamble.get("preconditions"):
-            doc["preconditions"] = preamble["preconditions"]
-
+        # preconditions live in the guide header, not per-suite
         doc["checksuites"] = checksuites
         docs.append(doc)
 
@@ -129,6 +126,14 @@ def extract(sections_dir: str, output_file: str) -> None:
     dumper = build_dumper()
 
     with open(output_file, "w", encoding="utf-8") as out:
+        # Write the guide-level header document if there are any preconditions.
+        # LoadRuleset detects it as the first title-less document.
+        if preamble.get("preconditions"):
+            header = {"preconditions": preamble["preconditions"]}
+            yaml.dump(header, out, Dumper=dumper, default_flow_style=False,
+                      allow_unicode=True, sort_keys=False, width=120)
+            out.write("\n---\n\n")
+
         for i, doc in enumerate(docs):
             if i > 0:
                 out.write("\n---\n\n")
