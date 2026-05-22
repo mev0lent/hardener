@@ -122,15 +122,19 @@ GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-macos .
 
 ---
 
-## Cross-Distro Test Harness (Linux, contributor use)
+## Cross-Distro Test Harness (contributor use)
 
-Automated VM-based testing of the Hardener tool across Linux distributions.
-Each distro gets a fresh KVM VM, runs the full audit → fix → rollback cycle,
-and produces structured results.
+Automated VM-based testing across Linux distributions. Each distro gets a fresh
+KVM VM, runs the full audit → fix → rollback cycle, and produces structured results.
 
-### Prerequisites
+> **Linux bare-metal host required for the Vagrant path.**
+> KVM/libvirt needs hardware virtualisation (VT-x or AMD-V) available directly on the CPU.
+> It will not work on macOS, Windows, or inside a VM (VMware/VirtualBox/WSL2).
+> If you are on such a host, use the Docker path below.
 
-**KVM / libvirt**
+### Vagrant / KVM
+
+**1. Install KVM and libvirt**
 
 ```bash
 sudo apt install qemu-kvm libvirt-daemon-system libvirt-clients virt-manager
@@ -139,32 +143,38 @@ sudo usermod -aG libvirt,kvm $USER
 # log out and back in for group membership to take effect
 ```
 
-Verify the host is capable:
+Verify:
 
 ```bash
 virt-host-validate
 ```
 
-All lines should say `PASS`. The `IOMMU` line may say `WARN`, that is fine.
-If you see `FAIL` on the KVM line, enable Intel VT-x or AMD-V in BIOS/UEFI.
+`IOMMU` and secure-guest `WARN` lines are fine. A `FAIL` on the **KVM** line means
+hardware virtualisation is not available — on bare metal, enable VT-x/AMD-V in
+BIOS/UEFI; inside a VM this setup cannot be used, use Docker instead.
 
-**Vagrant**
+**2. Install Vagrant**
 
-The Ubuntu package is outdated. Install from the HashiCorp apt repo:
+The distro package is often outdated. Install from the HashiCorp apt repo:
 
 ```bash
+# Resolve the correct apt suite.
+# Kali Linux returns "kali-rolling" which has no HashiCorp entry; fall back to bookworm.
+CODENAME=$(lsb_release -cs)
+[ "$CODENAME" = "kali-rolling" ] && CODENAME="bookworm"
+
 wget -O - https://apt.releases.hashicorp.com/gpg \
   | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
 
-echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
-  https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+  https://apt.releases.hashicorp.com ${CODENAME} main" \
   | sudo tee /etc/apt/sources.list.d/hashicorp.list
 
 sudo apt update && sudo apt install vagrant
 vagrant --version   # should print 2.4+
 ```
 
-**vagrant-libvirt plugin**
+**3. Install the vagrant-libvirt plugin**
 
 ```bash
 sudo apt install libvirt-dev ruby-dev build-essential
@@ -172,7 +182,7 @@ vagrant plugin install vagrant-libvirt
 vagrant plugin list   # should list vagrant-libvirt
 ```
 
-### Running the tests
+**4. Run the tests**
 
 ```bash
 cd testing
@@ -190,10 +200,33 @@ cd testing
 | `--level` | `baseline` | Security level: `baseline` or `high` |
 | `--distros` | all | Space-separated list of distros to run |
 
-Single distro (faster iteration):
+### Docker (Windows / macOS / VM hosts)
+
+Quick smoke-test without KVM. Does not run the full Vagrant cycle but verifies
+that checks load and execute correctly.
 
 ```bash
-./run_tests.sh --guide path/to/sections --binary /tmp/hardener-linux --distros "archlinux"
+# Build a Linux binary from any host
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/hardener-linux .
+
+# Run against a ruleset
+docker run --rm \
+  -v /tmp/hardener-linux:/hardener \
+  -v /path/to/ruleset.yaml:/ruleset.yaml \
+  ubuntu:24.04 \
+  /hardener audit --ruleset /ruleset.yaml --all
+
+# Run against a markdown guide directory
+docker run --rm \
+  -v /tmp/hardener-linux:/hardener \
+  -v /path/to/guide/sections:/guide \
+  ubuntu:24.04 \
+  /hardener audit --path /guide --all
+```
+
+On Windows (PowerShell), replace the build line with:
+```powershell
+$env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"; go build -o hardener-linux .
 ```
 
 ### What the runner does
@@ -203,13 +236,8 @@ For each distro:
 1. Boots a fresh KVM VM via Vagrant
 2. Installs distro-specific prerequisites inside the VM
 3. Rsyncs the guide and binary into the VM at `/opt/hardener/`
-4. Runs the 5-step test cycle:
-   - **Step 1**: Initial audit (`hardener audit --all`)
-   - **Step 2**: Fix (`hardener fix --all`)
-   - **Step 3**: Post-fix audit
-   - **Step 4**: Rollback (`hardener rollback --latest`)
-   - **Step 5**: Post-rollback audit
-5. Pulls results out of the VM over SSH
+4. Runs the 5-step test cycle: initial audit → fix → post-fix audit → rollback → post-rollback audit
+5. Pulls structured results out of the VM over SSH
 6. Destroys the VM
 
 ### Artefacts
@@ -219,29 +247,23 @@ Every run creates a timestamped directory under `testing/results/`:
 ```
 results/
 └── <TIMESTAMP>/
-    ├── summary.txt
-    ├── ubuntu.json
-    ├── ubuntu.log
-    ├── ubuntu-vagrant.log
+    ├── summary.txt          # cross-distro table
+    ├── ubuntu.json          # per-suite results for all 5 steps
+    ├── ubuntu.log           # verbose hardener output
+    ├── ubuntu-vagrant.log   # raw vagrant up / provisioning output
     └── ...
 ```
 
-### Summary table columns
+Summary table columns:
 
-```
-DISTRO   STATE │ A1_P A1_F A1_E A1_S A1_NC A1_T │ FX_OK FX_F FX_E FX_T │ A3_P A3_F A3_E A3_T
-ubuntu   OK    │   25   38    0   36     6  105  │    15   21    0  105  │   30   33    0  105
-```
-
-| Column | Meaning                                                              |
-|--------|----------------------------------------------------------------------|
-| `STATE` | `OK` = results extracted · `SKIP` = VM failed or produced no results |
-| `A1_P / A1_F / A1_E` | Initial audit: passed / failed / errors                              |
-| `A1_S` | Skipped: above requested security level                              |
-| `A1_NC` | Not configured: required file absent on this distro                  |
-| `A1_T` | Total checks                                                         |
-| `FX_OK / FX_F / FX_E` | Fixes applied / still failing / errors                               |
-| `A3_*` | Post-rollback audit: same columns as A1                              |
+| Column | Meaning |
+|--------|---------|
+| `STATE` | `OK` = results extracted · `SKIP` = VM failed or no results |
+| `A1_P / A1_F / A1_E` | Initial audit: passed / failed / errors |
+| `A1_S` | Skipped: above requested security level (neutral) |
+| `A1_NC` | Not configured: required file absent on this distro (neutral) |
+| `FX_OK / FX_F / FX_E` | Fixes applied / still failing / errors |
+| `A3_*` | Post-rollback audit: same columns as A1 |
 
 ### Supported distros
 
@@ -252,18 +274,16 @@ ubuntu   OK    │   25   38    0   36     6  105  │    15   21    0  105  │
 | rocky | `bento/rockylinux-9` | firewalld |
 | opensuse | `opensuse/Leap-15.6.x86_64` | firewalld |
 | archlinux | `generic/arch` | ufw |
-| fedora | `generic/fedora40` | firewalld |
-| rhel | *(requires subscription box)* | firewalld |
+| fedora | `bento/fedora-latest` | firewalld |
+| rhel | `generic/rhel9` *(requires subscription)* | firewalld |
 
 ### Troubleshooting
 
-**Distro shows `SKIP`**: open `<distro>-vagrant.log`. Common causes:
-- Box has no libvirt provider variant → use a `generic/*` or `bento/*` box
-- Package install failed during provisioning
+**Distro shows `SKIP`** — open `<distro>-vagrant.log`. Common causes: box has no libvirt provider variant; package install failed during provisioning.
 
-**All results are zero**: the binary failed system validation. Open `<distro>.log` and look for `[> ERROR]` lines. Usually a tool in `00_README.md` preconditions is missing.
+**All results are zero** — the binary failed system validation. Open `<distro>.log` and look for `[> ERROR]` lines. Usually a required tool from preconditions is missing on that distro.
 
-**`vagrant plugin install` fails**: install dev libraries first:
+**`vagrant plugin install` fails** — install dev libraries first:
 
 ```bash
 sudo apt install libvirt-dev ruby-dev build-essential
@@ -271,6 +291,6 @@ sudo apt install libvirt-dev ruby-dev build-essential
 
 ### Adding a distro
 
-1. Add an entry to the `DISTROS` hash in `testing/Vagrantfile`
+1. Add an entry to the `DISTROS` hash in `testing/Vagrantfile` with a libvirt-compatible box and its prereq install command
 2. Run: `./run_tests.sh --guide path/to/sections --binary /tmp/hardener-linux --distros "newdistro"`
 3. Check the vagrant log if it shows `SKIP`, the hardener log if results are all zero
