@@ -155,10 +155,13 @@ BIOS/UEFI; inside a VM this setup cannot be used, use Docker instead.
 
 **2. Install Vagrant**
 
-Follow the official instructions at <https://developer.hashicorp.com/vagrant/install>:
+The key at HashiCorp's `/gpg` URL does not always match the key currently signing
+the repo. Fetch it by fingerprint from a keyserver instead, which is always authoritative:
 
 ```bash
-wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+sudo gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys AA16FCBCA621E701
+sudo gpg --export AA16FCBCA621E701 \
+  | sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
 
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
   https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" \
