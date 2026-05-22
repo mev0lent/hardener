@@ -88,7 +88,11 @@ fi
 cp "$SCRIPT_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
 
 # Binary: use provided or compile (auto-compile only supported in guide mode)
-if [ -n "$BINARY_PATH" ] && [ -f "$BINARY_PATH" ]; then
+if [ -n "$BINARY_PATH" ] && [ ! -f "$BINARY_PATH" ]; then
+    echo "ERROR: binary not found: $BINARY_PATH"
+    exit 1
+fi
+if [ -n "$BINARY_PATH" ]; then
     echo "Using provided binary: $BINARY_PATH"
     cp "$BINARY_PATH" "$STAGING_DIR/hardener"
 elif [ -n "$RULESET_PATH" ]; then

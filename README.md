@@ -127,10 +127,9 @@ GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-macos .
 Automated VM-based testing across Linux distributions. Each distro gets a fresh
 KVM VM, runs the full audit → fix → rollback cycle, and produces structured results.
 
-> **Linux bare-metal host required for the Vagrant path.**
+> **Linux bare-metal host required.**
 > KVM/libvirt needs hardware virtualisation (VT-x or AMD-V) available directly on the CPU.
-> It will not work on macOS, Windows, or inside a VM (VMware/VirtualBox/WSL2).
-> If you are on such a host, use the Docker path below.
+> This test harness does not work on macOS, Windows, or inside a VM (VMware/VirtualBox/WSL2).
 
 ### Vagrant / KVM
 
@@ -189,20 +188,35 @@ vagrant plugin list   # should list vagrant-libvirt
 
 **4. Run the tests**
 
+Build the binary first from the repo root (same binary as the Quick Start — no need for a separate `/tmp` copy):
+
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-linux .
+```
+
+Then from the `testing/` directory:
+
 ```bash
 cd testing
+chmod +x run_tests.sh
+```
 
-# With a markdown guide directory
+With a markdown guide directory:
+
+```bash
 ./run_tests.sh \
   --guide   path/to/linux-guide/sections \
-  --binary  /tmp/hardener-linux \
+  --binary  ../hardener-linux \
   --distros "ubuntu debian rocky opensuse archlinux"
+```
 
-# With a standalone ruleset YAML (--binary required)
+With a standalone ruleset YAML (`--binary` is required in this mode):
+
+```bash
 ./run_tests.sh \
-  --ruleset path/to/ruleset.yaml \
-  --binary  /tmp/hardener-linux \
-  --distros "ubuntu debian rocky opensuse archlinux"
+  --ruleset ../ruleset.yaml \
+  --binary  ../hardener-linux \
+  --distros "ubuntu"
 ```
 
 | Flag | Default | Description |
@@ -214,35 +228,6 @@ cd testing
 | `--distros` | all | Space-separated list of distros to run |
 
 `--guide` and `--ruleset` are mutually exclusive; one must be provided.
-
-### Docker (Windows / macOS / VM hosts)
-
-Quick smoke-test without KVM. Does not run the full Vagrant cycle but verifies
-that checks load and execute correctly.
-
-```bash
-# Build a Linux binary from any host
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/hardener-linux .
-
-# Run against a ruleset
-docker run --rm \
-  -v /tmp/hardener-linux:/hardener \
-  -v /path/to/ruleset.yaml:/ruleset.yaml \
-  ubuntu:24.04 \
-  /hardener audit --ruleset /ruleset.yaml --all
-
-# Run against a markdown guide directory
-docker run --rm \
-  -v /tmp/hardener-linux:/hardener \
-  -v /path/to/guide/sections:/guide \
-  ubuntu:24.04 \
-  /hardener audit --path /guide --all
-```
-
-On Windows (PowerShell), replace the build line with:
-```powershell
-$env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"; go build -o hardener-linux .
-```
 
 ### What the runner does
 
@@ -307,5 +292,5 @@ sudo apt install libvirt-dev ruby-dev build-essential
 ### Adding a distro
 
 1. Add an entry to the `DISTROS` hash in `testing/Vagrantfile` with a libvirt-compatible box and its prereq install command
-2. Run: `./run_tests.sh --guide path/to/sections --binary /tmp/hardener-linux --distros "newdistro"`
+2. Run: `./run_tests.sh --guide path/to/sections --binary ../hardener-linux --distros "newdistro"`
 3. Check the vagrant log if it shows `SKIP`, the hardener log if results are all zero
