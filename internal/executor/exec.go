@@ -156,8 +156,9 @@ func RunCheck(check config.Check) (bool, string, error) {
 	// Determine if check passed
 	passed := output == check.Expected
 
-	// Special handling for grep -c: exit 1 with 0 matches is not a true command error
-	if strings.HasPrefix(check.Command, "grep -c") && exitCode == 1 && output == "0" {
+	// Special handling for grep -c: exit 1 with 0 matches is not a true command error.
+	// Matches both standalone "grep -c ..." and piped "... | grep -c ..."
+	if strings.Contains(check.Command, "grep -c") && exitCode == 1 && output == "0" {
 		return false, output, nil // check failed, but command worked
 	}
 
@@ -220,13 +221,11 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 
 	ui.PrintInfo(fmt.Sprintf("Post Action required: %s", check.PostAction))
 
-	// Handle command exit
 	if runErr != nil {
-		// Non-fatal: mark as applied but warn user
 		ui.PrintErrorMessage(fmt.Sprintf("Fix command for check %s exited with error: %v\nOutput:\n%s", check.ID, runErr, output))
-	} else {
-		ui.PrintFixed(fmt.Sprintf("Fix command for check %s applied successfully.", check.ID))
+		return false, output, nil
 	}
 
+	ui.PrintFixed(fmt.Sprintf("Fix command for check %s applied successfully.", check.ID))
 	return true, output, nil
 }

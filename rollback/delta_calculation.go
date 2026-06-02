@@ -27,6 +27,11 @@ func ApplyRollbackDelta(newText, delta string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	oldText, _ := dmp.PatchApply(patches, newText)
+	oldText, results := dmp.PatchApply(patches, newText)
+	for i, ok := range results {
+		if !ok {
+			return "", fmt.Errorf("patch %d of %d failed to apply — file may have changed since backup", i+1, len(results))
+		}
+	}
 	return oldText, nil
 }

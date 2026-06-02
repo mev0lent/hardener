@@ -34,10 +34,12 @@ func CheckPreconditions(tools []string) bool {
 }
 
 func DetermineSecurityFit(requestedLevel, checkLevel string) bool {
-    // If requested is "high", we want both "high" AND "baseline"
-    if requestedLevel == "high" {
-        return checkLevel == "high" || checkLevel == "baseline"
-    }
-    // If requested is "baseline", we ONLY want "baseline"
-    return checkLevel == "baseline"
+	switch requestedLevel {
+	case "high":
+		return checkLevel == "high" || checkLevel == "medium" || checkLevel == "baseline"
+	case "medium":
+		return checkLevel == "medium" || checkLevel == "baseline"
+	default: // "baseline" and any unknown level
+		return checkLevel == "baseline"
+	}
 }

@@ -159,7 +159,7 @@ func ApplyRun(ctx *config.ExecContext, files []string) error {
 	ui.PrintInfo(fmt.Sprintf("Looking up delta file: %s", deltaFile))
 	runs, err := initializeRuns(deltaFile)
 	if err != nil {
-		ui.PrintErrorMessage(fmt.Sprintf("warning: %v", err))
+		return ui.ReturnError("runs.json is corrupted and cannot be read — rollback aborted", err)
 	}
 	// pick target timestamp
 	target := ctx.Timestamp // set via CLI or fallback
