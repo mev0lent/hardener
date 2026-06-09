@@ -28,15 +28,14 @@ func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, s
 			suite.Title)
 		ui.PrintHeader(msg)
 
-		suiteResult, runs := runSuite(ctx, mode, suite, ctx.SecurityLevel)
+		suiteResult := runSuite(ctx, mode, suite, ctx.SecurityLevel)
 		suiteResults = append(suiteResults, suiteResult)
 
-		for id, passed := range runs {
-			checksPassed[id] = passed
-		}
-
-		// Collect fixApplied status from suiteResult
 		for _, check := range suiteResult.Checks {
+			if check.Skipped {
+				continue
+			}
+			checksPassed[check.ID] = check.Passed
 			if !check.Passed {
 				fixesApplied[check.ID] = check.FixApplied
 			}
@@ -46,14 +45,12 @@ func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, s
 	return suiteResults, checksPassed, fixesApplied, nil
 }
 
-func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string) (config.SuiteResult, map[string]bool) {
-	runs := make(map[string]bool)
+func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string) config.SuiteResult {
 	var checkResults []config.CheckResult
 
 	fixedCount, skippedCount, passedCount, failedCount, errorCount := 0, 0, 0, 0, 0
 	for _, check := range suite.Checks {
 		result := runCheck(ctx, mode, check, security_level)
-		runs[check.ID] = result.Passed
 		checkResults = append(checkResults, result)
 
 		// Print status immediately
@@ -101,7 +98,7 @@ func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, sec
 	return config.SuiteResult{
 		Title:  suite.Title,
 		Checks: checkResults,
-	}, runs
+	}
 }
 
 func RunCheck(check config.Check) (bool, string, error) {
