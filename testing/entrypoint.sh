@@ -10,6 +10,12 @@ HARDENER="/opt/hardener/hardener"
 RESULTS_DIR="/tmp/results"
 DISTRO="${DISTRO_NAME:-unknown}"
 SECURITY_LEVEL="${SECURITY_LEVEL:-baseline}"
+PROFILE="${PROFILE:-}"
+LABELS="${LABELS:-}"
+
+# Prevent terminal wrapping — keeps summary lines intact for the text parser
+export COLUMNS=300
+export TERM=dumb
 
 # Auto-detect input mode from what run_tests.sh staged
 if [ -f "/opt/hardener/ruleset.yaml" ]; then
@@ -19,6 +25,11 @@ else
     HARDENER_INPUT="--path /opt/hardener/guide"
     INPUT_DESC="guide: /opt/hardener/guide"
 fi
+
+# Build optional flags for profile and label
+EXTRA_FLAGS=""
+[ -n "$PROFILE" ] && EXTRA_FLAGS="$EXTRA_FLAGS --profile $PROFILE"
+[ -n "$LABELS"  ] && EXTRA_FLAGS="$EXTRA_FLAGS --label $LABELS"
 
 mkdir -p "$RESULTS_DIR"
 
@@ -50,33 +61,37 @@ run_step() {
     _STEP_RC=$rc
 }
 
-# Parse summary lines from hardener output
-# Handles multi-line visual boxes by joining the "Summary for" line with the next line
+# Parse summary lines from hardener output.
+# With COLUMNS=300 set above, summaries won't wrap — each box fits on one line.
 parse_summaries() {
     local output="$1"
     local summaries=""
 
-    # Strip box-drawing characters, then join each "Summary for" line with
-    # its continuation line before extracting numbers.
     local cleaned_output
     cleaned_output=$(echo "$output" | sed 's/│//g; s/╭//g; s/╰//g; s/─//g' | tr -s ' ')
 
     while IFS= read -r line; do
         local title
         title=$(echo "$line" | sed -n "s/.*Summary for '\([^']*\)'.*/\1/p")
+        [ -z "$title" ] && continue
 
-        local total passed failed errors skipped fixed not_configured
-        total=$(echo "$line"         | grep -oE '[0-9]+ total'         | awk '{print $1}')
-        passed=$(echo "$line"        | grep -oE '[0-9]+ passed'        | awk '{print $1}')
-        failed=$(echo "$line"        | grep -oE '[0-9]+ failed'        | awk '{print $1}')
-        errors=$(echo "$line"        | grep -oE '[0-9]+ errors'        | awk '{print $1}')
-        skipped=$(echo "$line"       | grep -oE '[0-9]+ skipped'       | awk '{print $1}')
-        fixed=$(echo "$line"         | grep -oE '[0-9]+ fixed'         | awk '{print $1}')
-        not_configured=$(echo "$line" | grep -oE '[0-9]+ not_configured' | awk '{print $1}')
+        # Join this line with the next (handles any minor 2-line wrap that slips through)
+        local combined
+        combined=$(echo "$cleaned_output" | grep -A 1 "Summary for '$title'" | tr '\n' ' ' | tr -s ' ')
 
-        total=${total:-0}; passed=${passed:-0}; failed=${failed:-0}
-        errors=${errors:-0}; skipped=${skipped:-0}; fixed=${fixed:-0}
-        not_configured=${not_configured:-0}
+        local total passed failed errors skipped fixed distro_skipped missing_cmd
+        total=$(echo "$combined"          | grep -oE '[0-9]+ total'          | head -1 | awk '{print $1}')
+        passed=$(echo "$combined"         | grep -oE '[0-9]+ passed'         | head -1 | awk '{print $1}')
+        failed=$(echo "$combined"         | grep -oE '[0-9]+ failed'         | head -1 | awk '{print $1}')
+        errors=$(echo "$combined"         | grep -oE '[0-9]+ errors'         | head -1 | awk '{print $1}')
+        skipped=$(echo "$combined"        | grep -oE '[0-9]+ skipped'        | head -1 | awk '{print $1}')
+        fixed=$(echo "$combined"          | grep -oE '[0-9]+ fixed'          | head -1 | awk '{print $1}')
+        distro_skipped=$(echo "$combined" | grep -oE '[0-9]+ distro-skipped' | head -1 | awk '{print $1}')
+        missing_cmd=$(echo "$combined"    | grep -oE '[0-9]+ missing-command'| head -1 | awk '{print $1}')
+
+        total=${total:-0};          passed=${passed:-0};           failed=${failed:-0}
+        errors=${errors:-0};        skipped=${skipped:-0};         fixed=${fixed:-0}
+        distro_skipped=${distro_skipped:-0}; missing_cmd=${missing_cmd:-0}
 
         local entry
         entry=$(cat <<ENTRY
@@ -88,7 +103,8 @@ parse_summaries() {
         "fixed": $fixed,
         "errors": $errors,
         "skipped": $skipped,
-        "not_configured": $not_configured
+        "distro_skipped": $distro_skipped,
+        "missing_command": $missing_cmd
       }
 ENTRY
         )
@@ -99,13 +115,35 @@ $entry"
         else
             summaries="$entry"
         fi
-    done < <(echo "$cleaned_output" | grep -A 1 "Summary for " | grep -v "^--$" | paste - - | tr '\t' ' ' | tr -s ' ' | grep "Summary for ")
+    done < <(echo "$cleaned_output" | grep "Summary for '")
 
     if [ -z "$summaries" ]; then
-        summaries='      { "suite": "NO_OUTPUT", "total": 0, "passed": 0, "failed": 0, "fixed": 0, "errors": 0, "skipped": 0 }'
+        summaries='      { "suite": "NO_OUTPUT", "total": 0, "passed": 0, "failed": 0, "fixed": 0, "errors": 0, "skipped": 0, "distro_skipped": 0, "missing_command": 0 }'
     fi
 
     echo "$summaries"
+}
+
+# Collect names of commands reported missing (one per line, sorted and unique).
+# Returns comma-separated list or empty string.
+collect_missing_cmds() {
+    local output="$1"
+    echo "$output" \
+        | grep -oE 'Required command "[^"]+" not found' \
+        | grep -oE '"[^"]+"' \
+        | tr -d '"' \
+        | sort -u \
+        | paste -sd ',' -
+}
+
+# Format a comma-separated list as a JSON string array.
+fmt_json_array() {
+    local cmds="$1"
+    if [ -z "$cmds" ]; then
+        echo "[]"
+    else
+        echo "[$( echo "$cmds" | tr ',' '\n' | sed 's/.*/  "&"/' | paste -sd ',' - | sed 's/  "/"/' )]"
+    fi
 }
 
 # ── preflight ────────────────────────────────────────────────────────────────
@@ -113,6 +151,8 @@ $entry"
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  Hardener Test — $DISTRO"
 echo "║  $(ts)"
+[ -n "$PROFILE" ] && echo "║  Profile: $PROFILE"
+[ -n "$LABELS"  ] && echo "║  Labels:  $LABELS"
 echo "╚══════════════════════════════════════════════════════════╝"
 
 if [ ! -x "$HARDENER" ]; then
@@ -141,18 +181,22 @@ fi
 
 echo ""
 echo "▶ STEP 1/5: Initial Audit"
+# shellcheck disable=SC2086
 run_step "01-audit-initial" \
-    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all $EXTRA_FLAGS
 AUDIT1_RC=$_STEP_RC
 AUDIT1_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
+AUDIT1_MISSING=$(collect_missing_cmds "$_STEP_OUTPUT")
 echo "  Exit code: $AUDIT1_RC"
+[ -n "$AUDIT1_MISSING" ] && echo "  Missing commands: $AUDIT1_MISSING"
 
 # ── step 2: fix ──────────────────────────────────────────────────────────────
 
 echo ""
 echo "▶ STEP 2/5: Fix"
+# shellcheck disable=SC2086
 run_step "02-fix" \
-    "$HARDENER" fix $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" fix $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all $EXTRA_FLAGS
 FIX_RC=$_STEP_RC
 FIX_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
 echo "  Exit code: $FIX_RC"
@@ -161,10 +205,12 @@ echo "  Exit code: $FIX_RC"
 
 echo ""
 echo "▶ STEP 3/5: Post-Fix Audit"
+# shellcheck disable=SC2086
 run_step "03-audit-postfix" \
-    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all $EXTRA_FLAGS
 AUDIT2_RC=$_STEP_RC
 AUDIT2_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
+AUDIT2_MISSING=$(collect_missing_cmds "$_STEP_OUTPUT")
 echo "  Exit code: $AUDIT2_RC"
 
 # ── step 4: rollback ────────────────────────────────────────────────────────
@@ -180,23 +226,28 @@ echo "  Exit code: $ROLLBACK_RC"
 
 echo ""
 echo "▶ STEP 5/5: Post-Rollback Audit"
+# shellcheck disable=SC2086
 run_step "05-audit-postrollback" \
-    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all
+    "$HARDENER" audit $HARDENER_INPUT --security-level "$SECURITY_LEVEL" --all $EXTRA_FLAGS
 AUDIT3_RC=$_STEP_RC
 AUDIT3_SUMMARIES=$(parse_summaries "$_STEP_OUTPUT")
+AUDIT3_MISSING=$(collect_missing_cmds "$_STEP_OUTPUT")
 echo "  Exit code: $AUDIT3_RC"
 
-# ── assemble JSON report ────────────────────────────────────────────────────
+# ── assemble JSON report ─────────────────────────────────────────────────────
 
 cat > "$REPORT" <<EOF
 {
   "distro": "$DISTRO",
   "timestamp": "$(ts)",
   "security_level": "$SECURITY_LEVEL",
+  "profile": "$PROFILE",
+  "labels": "$LABELS",
   "guide_files_found": $SUITE_FILES,
   "steps": {
     "01_audit_initial": {
       "exit_code": $AUDIT1_RC,
+      "missing_commands": $(fmt_json_array "$AUDIT1_MISSING"),
       "suites": [
 $AUDIT1_SUMMARIES
       ]
@@ -209,6 +260,7 @@ $FIX_SUMMARIES
     },
     "03_audit_postfix": {
       "exit_code": $AUDIT2_RC,
+      "missing_commands": $(fmt_json_array "$AUDIT2_MISSING"),
       "suites": [
 $AUDIT2_SUMMARIES
       ]
@@ -218,6 +270,7 @@ $AUDIT2_SUMMARIES
     },
     "05_audit_postrollback": {
       "exit_code": $AUDIT3_RC,
+      "missing_commands": $(fmt_json_array "$AUDIT3_MISSING"),
       "suites": [
 $AUDIT3_SUMMARIES
       ]

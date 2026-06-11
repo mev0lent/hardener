@@ -119,6 +119,12 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 	level, _ := cmd.Flags().GetString("security-level")
 	ctx.SecurityLevel = level
 
+	profile, _ := cmd.Flags().GetString("profile")
+	ctx.Profile = profile
+
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	ctx.Labels = labels
+
 	ui.PrintInfo(fmt.Sprintf("System: %s | Arch: %s", ctx.OSName, ctx.ArchName))
 	if ctx.OSName == "darwin" {
 		runHardwareInfo()
@@ -160,6 +166,17 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 		return nil
 	}
 
+	// Distro detection happens after both loading paths so ctx is always set.
+	ctx.DistroName = config.DetectDistro()
+	distroInfo := fmt.Sprintf("Distro: %s", ctx.DistroName)
+	if ctx.Profile != "" {
+		distroInfo += fmt.Sprintf(" | Profile: %s", ctx.Profile)
+	}
+	ui.PrintInfo(distroInfo)
+	if len(ctx.Labels) > 0 {
+		ui.PrintInfo(fmt.Sprintf("Label filter: %s", strings.Join(ctx.Labels, ", ")))
+	}
+
 	// ── Suite selection prompt ─────────────────────────────────────────────
 	runAll, _ := cmd.Flags().GetBool("all")
 	selectedSuites, err := promptForSuites(suites, runAll)
@@ -191,8 +208,9 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 // SystemInfo from the current runtime, no 00_README.md is required.
 func setupAndValidateRuleset(ctx *config.ExecContext, rulesetPath string) ([]config.TestSuite, config.SystemInfo, error) {
 	sys := config.SystemInfo{
-		OS:   runtime.GOOS,
-		Arch: runtime.GOARCH,
+		OS:     runtime.GOOS,
+		Arch:   runtime.GOARCH,
+		Distro: config.DetectDistro(),
 	}
 
 	ui.PrintInfo(fmt.Sprintf("Loading ruleset from %s", rulesetPath))
@@ -284,8 +302,9 @@ func compareTarget(path string, sys config.SystemInfo) (bool, config.SystemInfo)
 // for the classic markdown / guide-directory mode.
 func setupAndValidate(cmd *cobra.Command, title string, description string) (*config.ExecContext, config.SystemInfo, string, error) {
 	sys := config.SystemInfo{
-		OS:   runtime.GOOS,
-		Arch: runtime.GOARCH,
+		OS:     runtime.GOOS,
+		Arch:   runtime.GOARCH,
+		Distro: config.DetectDistro(),
 	}
 
 	ex, _ := os.Executable()

@@ -13,6 +13,7 @@ func MakeReport(sys config.SystemInfo, suiteResults []config.SuiteResult, report
 		Timestamp:    time.Now(),
 		OS:           sys.OS,
 		Arch:         sys.Arch,
+		Distro:       sys.Distro,
 		SuiteResults: suiteResults,
 		ReportType:   reportType,
 	}

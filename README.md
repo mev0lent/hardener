@@ -133,12 +133,91 @@ GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-macos .
 | `audit` / `fix` | `--ruleset <file>` | `-r` | Load checks from a ruleset YAML file |
 | `audit` / `fix` | `--path <dir>` | `-p` | Load checks from a hardening-guide directory (alternative to `--ruleset`) |
 | `audit` / `fix` | `--all` | `-A` | Skip interactive suite picker, run everything |
-| `audit` / `fix` | `--security-level <level>` | `-s` | `baseline` (default) or `high` |
-| `rollback` | `--latest` | `-l` | Roll back to the most recent fix run |
+| `audit` / `fix` | `--security-level <level>` | `-s` | `baseline` (default), `medium`, or `high` — runs checks at or below this level |
+| `audit` / `fix` | `--profile <name>` | `-P` | Role profile for distro overrides (e.g. `server`, `client`) |
+| `audit` / `fix` | `--label <l1,l2>` | `-l` | Run only suites whose `labels:` list contains at least one match |
+| `rollback` | `--latest` | | Roll back to the most recent fix run |
 | `rollback` | `--timestamp <ts>` | `-t` | Roll back to a specific run timestamp |
 | `rollback` | `--files <f1,f2>` | | Roll back specific files only |
 
 `--ruleset` and `--path` are mutually exclusive; exactly one must be provided for `audit` and `fix`.
+
+---
+
+## Ruleset Features
+
+### Security levels
+
+Every check has a `security_level` field (`baseline`, `medium`, `high`). Only checks at or below the level requested via `--security-level` are executed; the rest are reported as `skipped`. Default is `baseline`.
+
+### Distro-specific overrides
+
+Checks can carry a `distro:` map to override `command`, `fix`, `expected`, `sudo`, or `fix_sudo` for a specific Linux distribution. The key is the lowercase `ID=` value from `/etc/os-release`:
+
+```yaml
+- id: secure-boot-active
+  command: mokutil --sb-state | grep -c enabled
+  distro:
+    debian:
+      command: |
+        if ! command -v mokutil >/dev/null 2>&1; then echo 1
+        else mokutil --sb-state | grep -c enabled; fi
+```
+
+If a check has a `distro:` map but the current distro is not listed, the check is skipped with a distinct `skipped_distro` state — it does not count as a failure.
+
+### Profiles (`--profile`)
+
+For role-based differences (server vs. client), pass a profile at runtime:
+
+```bash
+./hardener-linux audit --ruleset ruleset.yaml --profile server
+```
+
+The engine tries the combined key `distro-profile` (e.g. `debian-server`) first, then falls back to `distro` alone, then runs the universal check. This lets you express distro+role overrides without duplicating entries:
+
+```yaml
+distro:
+  debian-server:
+    command: systemctl is-active sshd | grep -c active
+  debian:
+    command: command -v sshd >/dev/null 2>&1 && echo 0 || echo 0
+```
+
+### Labels (`--label`)
+
+Each suite in a ruleset has a `labels:` list. Use `--label` to run only matching suites:
+
+```bash
+# Run only kernel and network suites
+./hardener-linux audit --ruleset ruleset.yaml --label kernel,network
+```
+
+Available labels in the Linux ruleset: `auth`, `network`, `kernel`, `filesystem`, `boot`, `services`, `audit`, `logging`.
+
+### `requires_command`
+
+A check with `requires_command: <binary>` is silently skipped with a `missing-command` state when that binary is not in the system's `PATH`. This keeps checks that depend on optional tools from showing as errors on systems where the tool isn't installed:
+
+```yaml
+- id: secure-boot-active
+  requires_command: mokutil
+  command: mokutil --sb-state | grep -c enabled
+  expected: 1
+```
+
+Missing-command skips appear in suite summaries and are tracked separately from failures.
+
+### `expected_op`
+
+By default the check compares command output against `expected` as a string. Set `expected_op` to use a numeric comparison instead:
+
+```yaml
+expected: 1
+expected_op: '>='
+```
+
+Supported operators: `>=`, `>`, `<=`, `<`.
 
 ---
 
@@ -244,8 +323,10 @@ With a standalone ruleset YAML (`--binary` is required in this mode):
 | `--guide` | | Path to a hardening-guide directory of `.md` files |
 | `--ruleset` | | Path to a standalone `ruleset.yaml` (alternative to `--guide`) |
 | `--binary` | *(required with `--ruleset`)* | Path to the pre-built hardener binary |
-| `--level` | `baseline` | Security level: `baseline` or `high` |
+| `--level` | `baseline` | Security level: `baseline`, `medium`, or `high` |
 | `--distros` | all | Space-separated list of distros to run |
+| `--profile` | | Passed as `--profile` to hardener (e.g. `server`, `client`) |
+| `--label` | | Passed as `--label` to hardener (e.g. `kernel,network`) |
 
 `--guide` and `--ruleset` are mutually exclusive; one must be provided.
 
@@ -280,10 +361,16 @@ Summary table columns:
 |--------|---------|
 | `STATE` | `OK` = results extracted · `SKIP` = VM failed or no results |
 | `A1_P / A1_F / A1_E` | Initial audit: passed / failed / errors |
-| `A1_S` | Skipped: above requested security level (neutral) |
-| `A1_NC` | Not configured: required file absent on this distro (neutral) |
-| `FX_OK / FX_F / FX_E` | Fixes applied / still failing / errors |
+| `A1_S` | Skipped: check above the requested security level (neutral) |
+| `A1_DS` | Distro-skipped: check has a `distro:` map but current distro not listed (neutral) |
+| `A1_MC` | Missing-command: `requires_command` binary not found on this distro (neutral) |
+| `A1_T` | Total checks in suite |
+| `FX_OK / FX_F` | Fixes applied / still failing after fix |
 | `A3_*` | Post-rollback audit: same columns as A1 |
+
+A healthy run has low `A1_F` and `A1_E`. `A1_S`, `A1_DS`, and `A1_MC` are all neutral — they are expected to vary by distro and security level and do not indicate broken checks.
+
+After the table, the runner prints a **missing commands per distro** section listing the exact binary names that triggered `A1_MC` on each distro. Use this to decide whether to add a package to the Vagrantfile's `pkg_cmd` or to add a `requires_command:` field to the relevant checks.
 
 ### Supported distros
 
@@ -302,6 +389,8 @@ Summary table columns:
 **Distro shows `SKIP`**: open `<distro>-vagrant.log`. Common causes: box has no libvirt provider variant; package install failed during provisioning.
 
 **All results are zero**: the binary failed system validation. Open `<distro>.log` and look for `[> ERROR]` lines. Usually a required tool from preconditions is missing on that distro.
+
+**High `A1_MC`**: many checks are skipped due to missing binaries. Check the "Missing commands per distro" section of `summary.txt` for the exact binary names. Either add the package to the Vagrantfile `pkg_cmd` for that distro, or add `requires_command:` to the affected checks so the skip is intentional and documented.
 
 **`vagrant plugin install` fails**: install dev libraries first:
 

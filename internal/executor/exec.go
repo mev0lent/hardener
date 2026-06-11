@@ -7,6 +7,7 @@ import (
 	"hardener/internal/ui"
 	"hardener/rollback"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -24,19 +25,21 @@ func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, s
 	var suiteResults []config.SuiteResult
 
 	for _, suite := range suites {
+		if !suiteMatchesLabels(suite, ctx.Labels) {
+			continue
+		}
 		msg := fmt.Sprintf("=== Running suite: %s ===",
 			suite.Title)
 		ui.PrintHeader(msg)
 
-		suiteResult, runs := runSuite(ctx, mode, suite, ctx.SecurityLevel)
+		suiteResult := runSuite(ctx, mode, suite, ctx.SecurityLevel)
 		suiteResults = append(suiteResults, suiteResult)
 
-		for id, passed := range runs {
-			checksPassed[id] = passed
-		}
-
-		// Collect fixApplied status from suiteResult
 		for _, check := range suiteResult.Checks {
+			if check.Skipped || check.SkippedDistro || check.SkippedMissing {
+				continue
+			}
+			checksPassed[check.ID] = check.Passed
 			if !check.Passed {
 				fixesApplied[check.ID] = check.FixApplied
 			}
@@ -46,19 +49,22 @@ func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, s
 	return suiteResults, checksPassed, fixesApplied, nil
 }
 
-func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string) (config.SuiteResult, map[string]bool) {
-	runs := make(map[string]bool)
+func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string) config.SuiteResult {
 	var checkResults []config.CheckResult
 
-	fixedCount, skippedCount, passedCount, failedCount, errorCount := 0, 0, 0, 0, 0
+	fixedCount, skippedCount, distroSkippedCount, missingCount, passedCount, failedCount, errorCount := 0, 0, 0, 0, 0, 0, 0
 	for _, check := range suite.Checks {
 		result := runCheck(ctx, mode, check, security_level)
-		runs[check.ID] = result.Passed
 		checkResults = append(checkResults, result)
 
 		// Print status immediately
 
-		if result.Skipped {
+		if result.SkippedMissing {
+			missingCount++
+		} else if result.SkippedDistro {
+			ui.PrintSkipped(fmt.Sprintf("%s (distro)", check.ID))
+			distroSkippedCount++
+		} else if result.Skipped {
 			ui.PrintSkipped(check.ID)
 			skippedCount++
 		} else if result.FixApplied {
@@ -90,18 +96,56 @@ func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, sec
 	}
 	summary := fmt.Sprintf("")
 	if mode == ModeAudit {
-		summary = fmt.Sprintf("Summary for '%s': %d total, %d passed, %d failed, %d errors, %d skipped",
-			suite.Title, len(suite.Checks), passedCount, failedCount, errorCount, skippedCount)
+		summary = fmt.Sprintf("Summary for '%s': %d total, %d passed, %d failed, %d errors, %d skipped, %d distro-skipped, %d missing-command",
+			suite.Title, len(suite.Checks), passedCount, failedCount, errorCount, skippedCount, distroSkippedCount, missingCount)
 	} else if mode == ModeFix {
-		summary = fmt.Sprintf("Summary for '%s': %d total, %d fixed, %d passed, %d failed, %d errors, %d skipped",
-			suite.Title, len(suite.Checks), fixedCount, passedCount, failedCount, errorCount, skippedCount)
+		summary = fmt.Sprintf("Summary for '%s': %d total, %d fixed, %d passed, %d failed, %d errors, %d skipped, %d distro-skipped, %d missing-command",
+			suite.Title, len(suite.Checks), fixedCount, passedCount, failedCount, errorCount, skippedCount, distroSkippedCount, missingCount)
 	}
 	ui.PrintSummary(summary)
 
 	return config.SuiteResult{
 		Title:  suite.Title,
 		Checks: checkResults,
-	}, runs
+	}
+}
+
+func suiteMatchesLabels(suite config.TestSuite, requested []string) bool {
+	if len(requested) == 0 {
+		return true
+	}
+	for _, req := range requested {
+		for _, label := range suite.Labels {
+			if strings.EqualFold(label, req) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// compareExpected evaluates whether output satisfies the expected value under the given op.
+// Supported ops: ">=", ">", "<=", "<" (numeric); anything else falls back to string equality.
+func compareExpected(output, expected, op string) bool {
+	switch op {
+	case ">=", ">", "<=", "<":
+		outVal, err1 := strconv.Atoi(strings.TrimSpace(output))
+		expVal, err2 := strconv.Atoi(strings.TrimSpace(expected))
+		if err1 != nil || err2 != nil {
+			return false
+		}
+		switch op {
+		case ">=":
+			return outVal >= expVal
+		case ">":
+			return outVal > expVal
+		case "<=":
+			return outVal <= expVal
+		case "<":
+			return outVal < expVal
+		}
+	}
+	return output == expected
 }
 
 func RunCheck(check config.Check) (bool, string, error) {
@@ -153,13 +197,11 @@ func RunCheck(check config.Check) (bool, string, error) {
 		}
 	}
 
-	// Determine if check passed
-	passed := output == check.Expected
-
 	// Special handling for grep -c: exit 1 with 0 matches is not a true command error.
 	// Matches both standalone "grep -c ..." and piped "... | grep -c ..."
 	if strings.Contains(check.Command, "grep -c") && exitCode == 1 && output == "0" {
-		return false, output, nil // check failed, but command worked
+		passed := compareExpected(output, check.Expected, check.ExpectedOp)
+		return passed, output, nil
 	}
 
 	// Any other non-zero exit code = real error
@@ -167,6 +209,7 @@ func RunCheck(check config.Check) (bool, string, error) {
 		return false, output, fmt.Errorf("command exited with code %d", exitCode)
 	}
 
+	passed := compareExpected(output, check.Expected, check.ExpectedOp)
 	return passed, output, nil
 }
 

@@ -31,7 +31,7 @@ func PrintDebugMessage(message string, platform string, arch string) {
 }
 
 func Error(err error) error {
-	return fmt.Errorf(ErrorBox.Render("[> ERROR] " + err.Error()))
+	return fmt.Errorf("%s", ErrorBox.Render("[> ERROR] "+err.Error()))
 }
 
 func ReturnError(message string, error error) error {
@@ -69,6 +69,11 @@ func PrintFinalInfo(message string) {
 
 func PrintSkipped(id string) {
 	msg := fmt.Sprintf("[> SKIPPED]: %s | Test had a higher security level than asked for by user.\n", id)
+	fmt.Println(Info(msg))
+}
+
+func PrintSkippedMissing(id, command string) {
+	msg := fmt.Sprintf("[> SKIPPED]: %s | Required command %q not found on this system.\n", id, command)
 	fmt.Println(Info(msg))
 }
 

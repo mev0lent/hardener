@@ -3,8 +3,14 @@
 # run_tests.sh: Hardener cross-distro test orchestrator (Vagrant/libvirt)
 #
 # Usage:
-#   ./run_tests.sh --guide PATH   --binary PATH [--level LEVEL] [--distros "d1 d2"]
-#   ./run_tests.sh --ruleset FILE --binary PATH [--level LEVEL] [--distros "d1 d2"]
+#   ./run_tests.sh --guide PATH   --binary PATH [options]
+#   ./run_tests.sh --ruleset FILE --binary PATH [options]
+#
+# Options:
+#   --level   baseline|medium|high  (default: baseline)
+#   --distros "d1 d2 ..."           (default: ubuntu debian rocky opensuse archlinux)
+#   --profile server|client|...     passed as --profile to hardener
+#   --label   kernel,network,...    passed as --label to hardener
 #
 # Prerequisites:
 #   - Vagrant 2.4+ with vagrant-libvirt plugin
@@ -19,6 +25,8 @@ RULESET_PATH=""
 BINARY_PATH=""
 SECURITY_LEVEL="baseline"
 DISTROS="ubuntu debian rocky opensuse archlinux"
+PROFILE=""
+LABELS=""
 RESULTS_DIR="$SCRIPT_DIR/results"
 STAGING_DIR="$SCRIPT_DIR/.staging"
 TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
@@ -32,8 +40,10 @@ while [[ $# -gt 0 ]]; do
         --binary)   BINARY_PATH="$2";   shift 2 ;;
         --level)    SECURITY_LEVEL="$2"; shift 2 ;;
         --distros)  DISTROS="$2";       shift 2 ;;
+        --profile)  PROFILE="$2";       shift 2 ;;
+        --label)    LABELS="$2";        shift 2 ;;
         --help|-h)
-            echo "Usage: $0 (--guide PATH | --ruleset FILE) --binary PATH [--level baseline|high] [--distros \"d1 d2\"]"
+            echo "Usage: $0 (--guide PATH | --ruleset FILE) --binary PATH [--level baseline|medium|high] [--distros \"d1 d2\"] [--profile PROFILE] [--label label1,label2]"
             exit 0 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -70,13 +80,14 @@ echo "║  $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 echo "║  Input:    $INPUT_LABEL"
 echo "║  Level:    $SECURITY_LEVEL"
 echo "║  Distros:  $DISTROS"
+[ -n "$PROFILE" ] && echo "║  Profile:  $PROFILE"
+[ -n "$LABELS"  ] && echo "║  Labels:   $LABELS"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR" "$RESULTS_DIR/$TIMESTAMP"
 
-# Stage input: either a guide directory or a single ruleset yaml
 if [ -n "$GUIDE_PATH" ]; then
     mkdir -p "$STAGING_DIR/guide"
     cp -r "$GUIDE_PATH"/. "$STAGING_DIR/guide/"
@@ -84,10 +95,8 @@ else
     cp "$RULESET_PATH" "$STAGING_DIR/ruleset.yaml"
 fi
 
-# Copy entrypoint
 cp "$SCRIPT_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
 
-# Binary: use provided or compile (auto-compile only supported in guide mode)
 if [ -n "$BINARY_PATH" ] && [ ! -f "$BINARY_PATH" ]; then
     echo "ERROR: binary not found: $BINARY_PATH"
     exit 1
@@ -113,7 +122,7 @@ chmod +x "$STAGING_DIR/hardener" "$STAGING_DIR/entrypoint.sh"
 echo "Staging complete: $(du -sh "$STAGING_DIR" | cut -f1)"
 echo ""
 
-# ── run per distro ──────────────────────────────────────────────────────────
+# ── run per distro ───────────────────────────────────────────────────────────
 
 PASS_DISTROS=""
 FAIL_DISTROS=""
@@ -123,22 +132,19 @@ for distro in $DISTROS; do
     echo "│  $distro — booting VM"
     echo "└──────────────────────────────────────────────────────────┘"
 
-    # Export security level so Vagrantfile can pass it through
-    export SECURITY_LEVEL
+    # Pass all variables via env: in Vagrantfile (see Vagrantfile for why)
+    export SECURITY_LEVEL PROFILE LABELS
 
-    # Boot, provision, and run test (all in one vagrant up)
     if (cd "$SCRIPT_DIR" && vagrant up "$distro" --provider=libvirt 2>&1 | \
         tee "$RESULTS_DIR/$TIMESTAMP/${distro}-vagrant.log"); then
 
         echo ""
         echo "  Extracting results..."
 
-        # Pull JSON report out of the VM
         (cd "$SCRIPT_DIR" && vagrant ssh "$distro" -c \
             "cat /tmp/results/${distro}.json 2>/dev/null" \
             > "$RESULTS_DIR/$TIMESTAMP/${distro}.json" 2>/dev/null) || true
 
-        # Pull full log out of the VM
         (cd "$SCRIPT_DIR" && vagrant ssh "$distro" -c \
             "cat /tmp/results/${distro}.log 2>/dev/null" \
             > "$RESULTS_DIR/$TIMESTAMP/${distro}.log" 2>/dev/null) || true
@@ -155,13 +161,12 @@ for distro in $DISTROS; do
         FAIL_DISTROS="$FAIL_DISTROS $distro"
     fi
 
-    # Tear down
     echo "  Destroying VM..."
     (cd "$SCRIPT_DIR" && vagrant destroy "$distro" -f 2>/dev/null) || true
     echo ""
 done
 
-# ── cross-distro summary ────────────────────────────────────────────────────
+# ── cross-distro summary ─────────────────────────────────────────────────────
 
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  CROSS-DISTRO SUMMARY"
@@ -171,17 +176,19 @@ echo ""
 SUMMARY_FILE="$RESULTS_DIR/$TIMESTAMP/summary.txt"
 
 {
-    printf "%-14s %-6s │ %5s %5s %5s %5s %5s %5s │ %5s %5s %5s %5s │ %5s %5s %5s %5s\n" \
+    # Header: A1=initial audit, FX=fix, A3=post-rollback audit
+    # DS=distro-skipped, MC=missing-command
+    printf "%-14s %-6s │ %5s %5s %5s %5s %5s %5s %5s │ %5s %5s %5s │ %5s %5s %5s\n" \
         "DISTRO" "STATE" \
-        "A1_P" "A1_F" "A1_E" "A1_S" "A1_NC" "A1_T" \
-        "FX_OK" "FX_F" "FX_E" "FX_T" \
-        "A3_P" "A3_F" "A3_E" "A3_T"
-    echo "───────────────────────┼─────────────────────────────────────┼─────────────────────────┼─────────────────────────"
+        "A1_P" "A1_F" "A1_E" "A1_S" "A1_DS" "A1_MC" "A1_T" \
+        "FX_OK" "FX_F" "FX_T" \
+        "A3_P" "A3_F" "A3_T"
+    echo "───────────────────────┼─────────────────────────────────────────────┼──────────────────┼──────────────────"
 
     for distro in $DISTROS; do
         JSON="$RESULTS_DIR/$TIMESTAMP/${distro}.json"
         if [ ! -s "$JSON" ]; then
-            printf "%-14s %-6s │ %39s │ %25s │ %25s\n" \
+            printf "%-14s %-6s │ %43s │ %18s │ %18s\n" \
                 "$distro" "SKIP" "-- no results --" "" ""
             continue
         fi
@@ -189,7 +196,7 @@ SUMMARY_FILE="$RESULTS_DIR/$TIMESTAMP/summary.txt"
         STATUS="OK"
         echo "$FAIL_DISTROS" | grep -qw "$distro" 2>/dev/null && STATUS="FAIL"
 
-        # Helper: sum a field across all suite entries within a JSON section
+        # Sum a JSON number field across all suites in a step section
         sum_field() {
             local file="$1" start="$2" end="$3" field="$4"
             sed -n "/$start/,/$end/p" "$file" \
@@ -198,51 +205,78 @@ SUMMARY_FILE="$RESULTS_DIR/$TIMESTAMP/summary.txt"
                 | awk '{s+=$1} END {print s+0}'
         }
 
-        # Initial audit (step 01)
-        a1_p=$(sum_field "$JSON" "01_audit_initial" "02_fix" "passed")
-        a1_f=$(sum_field "$JSON" "01_audit_initial" "02_fix" "failed")
-        a1_e=$(sum_field "$JSON" "01_audit_initial" "02_fix" "errors")
-        a1_s=$(sum_field "$JSON" "01_audit_initial" "02_fix" "skipped")
-        a1_nc=$(sum_field "$JSON" "01_audit_initial" "02_fix" "not_configured")
-        a1_t=$(sum_field "$JSON" "01_audit_initial" "02_fix" "total")
+        # Initial audit
+        a1_p=$(sum_field  "$JSON" "01_audit_initial" "02_fix" "passed")
+        a1_f=$(sum_field  "$JSON" "01_audit_initial" "02_fix" "failed")
+        a1_e=$(sum_field  "$JSON" "01_audit_initial" "02_fix" "errors")
+        a1_s=$(sum_field  "$JSON" "01_audit_initial" "02_fix" "skipped")
+        a1_ds=$(sum_field "$JSON" "01_audit_initial" "02_fix" "distro_skipped")
+        a1_mc=$(sum_field "$JSON" "01_audit_initial" "02_fix" "missing_command")
+        a1_t=$(sum_field  "$JSON" "01_audit_initial" "02_fix" "total")
 
-        # Fix (step 02) — FX_T = only checks where a fix was attempted (OK+F+E)
+        # Fix
         fx_ok=$(sum_field "$JSON" "02_fix" "03_audit_postfix" "fixed")
-        fx_f=$(sum_field "$JSON"  "02_fix" "03_audit_postfix" "failed")
-        fx_e=$(sum_field "$JSON"  "02_fix" "03_audit_postfix" "errors")
-        fx_t=$((fx_ok + fx_f + fx_e))
+        fx_f=$(sum_field  "$JSON" "02_fix" "03_audit_postfix" "failed")
+        fx_t=$((fx_ok + fx_f))
 
-        # Post-rollback audit (step 05) — sed to EOF since there is no next section
+        # Post-rollback audit
         a3_p=$(sed -n '/05_audit_postrollback/,$p' "$JSON" | grep '"passed"'  | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
         a3_f=$(sed -n '/05_audit_postrollback/,$p' "$JSON" | grep '"failed"'  | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
-        a3_e=$(sed -n '/05_audit_postrollback/,$p' "$JSON" | grep '"errors"'  | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
         a3_t=$(sed -n '/05_audit_postrollback/,$p' "$JSON" | grep '"total"'   | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
 
-        printf "%-14s %-6s │ %5d %5d %5d %5d %5d %5d │ %5d %5d %5d %5d │ %5d %5d %5d %5d\n" \
+        printf "%-14s %-6s │ %5d %5d %5d %5d %5d %5d %5d │ %5d %5d %5d │ %5d %5d %5d\n" \
             "$distro" "$STATUS" \
-            "$a1_p" "$a1_f" "$a1_e" "$a1_s" "$a1_nc" "$a1_t" \
-            "$fx_ok" "$fx_f" "$fx_e" "$fx_t" \
-            "$a3_p" "$a3_f" "$a3_e" "$a3_t"
+            "$a1_p" "$a1_f" "$a1_e" "$a1_s" "$a1_ds" "$a1_mc" "$a1_t" \
+            "$fx_ok" "$fx_f" "$fx_t" \
+            "$a3_p" "$a3_f" "$a3_t"
     done
 } | tee "$SUMMARY_FILE"
 
 echo ""
 echo "Columns"
-echo "  A1/A3  P=passed  F=failed  E=errors  S=skipped  NC=not_configured  T=total"
-echo "  FX     OK=fixes applied  F=still failed  E=errors  T=fix-attempted (OK+F+E)"
+echo "  A1/A3  P=passed  F=failed  E=errors  S=skipped  DS=distro-skipped  MC=missing-command  T=total"
+echo "  FX     OK=fixes applied  F=still failed  T=fix-attempted (OK+F)"
 echo ""
 echo "Healthy run"
-echo "  A1: F+E low, NC and S are neutral (not failures)"
+echo "  A1: F+E low; S, DS, MC are neutral (not failures — expected on partial installs)"
 echo "  FX: OK high, F low — ideally OK/T near 100%"
 echo "  A3: F ≈ A1_F  (small drift from runtime state is expected)"
 echo ""
-echo "  NC = required config file not present on this system"
-echo "  S  = check above requested security level"
+
+# ── missing-command report ───────────────────────────────────────────────────
+
+echo "Missing commands per distro (initial audit):"
+for distro in $DISTROS; do
+    JSON="$RESULTS_DIR/$TIMESTAMP/${distro}.json"
+    [ ! -s "$JSON" ] && continue
+
+    # Extract missing_commands array from JSON — try python3 first, fall back to grep
+    if command -v python3 >/dev/null 2>&1; then
+        missing=$(python3 - "$JSON" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    cmds = d.get("steps", {}).get("01_audit_initial", {}).get("missing_commands", [])
+    print(", ".join(cmds) if cmds else "none")
+except Exception:
+    print("?")
+PYEOF
+        )
+    else
+        # Simple grep fallback — pulls quoted strings from the missing_commands array
+        missing=$(sed -n '/"missing_commands"/,/\]/p' "$JSON" \
+            | grep -oE '"[^"]+"' | tr -d '"' | grep -v missing_commands \
+            | paste -sd ',' - || echo "?")
+        [ -z "$missing" ] && missing="none"
+    fi
+
+    printf "  %-14s %s\n" "$distro:" "$missing"
+done | tee -a "$SUMMARY_FILE"
+
+# ── rollback integrity ───────────────────────────────────────────────────────
+
 echo ""
-
-# ── rollback integrity ──────────────────────────────────────────────────────
-
-echo "Rollback delta (A1 failed vs A3 failed — drift expected for runtime state):"
+echo "Rollback delta (A1 failed → A3 failed — small drift expected for runtime state):"
 for distro in $DISTROS; do
     JSON="$RESULTS_DIR/$TIMESTAMP/${distro}.json"
     [ ! -s "$JSON" ] && continue
@@ -251,11 +285,11 @@ for distro in $DISTROS; do
     a3_f=$(sed -n '/05_audit_postrollback/,$p'   "$JSON" | grep '"failed"' | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
 
     echo "  $distro: A1_failed=$a1_f → A3_failed=$a3_f"
-done
+done | tee -a "$SUMMARY_FILE"
 
 echo ""
 echo "Full results: $RESULTS_DIR/$TIMESTAMP/"
 
-# ── cleanup staging ─────────────────────────────────────────────────────────
+# ── cleanup staging ──────────────────────────────────────────────────────────
 
 rm -rf "$STAGING_DIR"

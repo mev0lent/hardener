@@ -6,6 +6,9 @@ type ExecContext struct {
 	SecurityLevel string
 	OSName        string
 	ArchName      string
+	DistroName    string
+	Profile       string
+	Labels        []string
 	Timestamp     string
 	Extra         map[string]interface{}
 }

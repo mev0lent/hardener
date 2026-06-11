@@ -54,12 +54,19 @@ Vagrant.configure("2") do |config|
       SHELL
 
       # Step 3: Run the full test cycle
-      node.vm.provision "test", type: "shell", inline: <<-SHELL
-        set -e
-        export DISTRO_NAME="#{name}"
-        export SECURITY_LEVEL="${SECURITY_LEVEL:-baseline}"
-        bash /opt/hardener/entrypoint.sh
-      SHELL
+      # env: passes host environment variables into the VM provisioner correctly.
+      # ${VAR} in inline shell would reference the *VM's* environment, not the host's.
+      node.vm.provision "test", type: "shell",
+        env: {
+          "DISTRO_NAME"    => name,
+          "SECURITY_LEVEL" => ENV.fetch("SECURITY_LEVEL", "baseline"),
+          "PROFILE"        => ENV.fetch("PROFILE",        ""),
+          "LABELS"         => ENV.fetch("LABELS",         ""),
+        },
+        inline: <<-SHELL
+          set -e
+          bash /opt/hardener/entrypoint.sh
+        SHELL
     end
   end
 end
