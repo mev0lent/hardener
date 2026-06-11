@@ -23,6 +23,7 @@ type rulesetDoc struct {
 	Title  string   `yaml:"title"`
 	OS     string   `yaml:"os"`
 	Arch   []string `yaml:"arch"`
+	Labels []string `yaml:"labels"`
 	Suites []Check  `yaml:"checksuites"`
 	Checks []Check  `yaml:"checks"` // fallback key used by some entries in the wild
 }
@@ -107,7 +108,7 @@ func LoadRuleset(path string) ([]TestSuite, error) {
 
 		suites = append(suites, TestSuite{
 			Title:  rd.Title,
-			Labels: []string{strings.ToLower(rd.Title)},
+			Labels: rd.Labels,
 			OS:     rd.OS,
 			Arch:   rd.Arch,
 			Checks: checks,
