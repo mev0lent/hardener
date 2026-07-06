@@ -6,10 +6,73 @@ import (
 	"hardener/internal/config"
 	"hardener/internal/ui"
 	"hardener/rollback"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 )
+
+// hardenerSbinDirs are the sbin locations we prepend to PATH. Distros like
+// openSUSE do not include /usr/sbin in the login PATH for regular users, which
+// makes commands such as `sysctl`, `firewall-cmd`, `iptables`, and `auditctl`
+// return exit 127 in non-privileged checks. sudo also resets PATH via
+// secure_path from sudoers, and some distros ship a secure_path that omits
+// /usr/sbin, so we ALSO inject an `export PATH=...` prefix into the shell
+// command itself — that prefix runs inside the sudo'd shell after sudo has
+// reset the environment, guaranteeing our sbin dirs are visible.
+var hardenerSbinDirs = []string{"/usr/local/sbin", "/usr/sbin", "/sbin"}
+
+// pathPrefix is the shell snippet prepended to every check/fix command so
+// that sysctl/firewall-cmd/auditctl/iptables are always findable regardless
+// of sudo's secure_path or the user's login PATH.
+const pathPrefix = `export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH:-/usr/local/bin:/usr/bin:/bin}"; `
+
+// wrapWithPath prepends pathPrefix to the shell command.
+func wrapWithPath(cmd string) string {
+	return pathPrefix + cmd
+}
+
+// HardenerCmdEnv returns the environment that every check/fix command should
+// run with: the parent process env plus /usr/local/sbin, /usr/sbin, /sbin
+// prepended to PATH if they are not already present. This helps non-sudo
+// commands; sudo'd commands additionally get the pathPrefix wrapped into the
+// command string above.
+func HardenerCmdEnv() []string {
+	env := os.Environ()
+	currentPath := ""
+	pathIdx := -1
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			currentPath = strings.TrimPrefix(kv, "PATH=")
+			pathIdx = i
+			break
+		}
+	}
+	parts := strings.Split(currentPath, ":")
+	seen := make(map[string]bool, len(parts))
+	for _, p := range parts {
+		seen[p] = true
+	}
+	var prepend []string
+	for _, d := range hardenerSbinDirs {
+		if !seen[d] {
+			prepend = append(prepend, d)
+			seen[d] = true
+		}
+	}
+	if len(prepend) == 0 {
+		return env
+	}
+	newPath := strings.Join(prepend, ":")
+	if currentPath != "" {
+		newPath += ":" + currentPath
+	}
+	if pathIdx == -1 {
+		return append(env, "PATH="+newPath)
+	}
+	env[pathIdx] = "PATH=" + newPath
+	return env
+}
 
 // RunSuites orchestrates the execution of all test suites.
 func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, suites []config.TestSuite) (
@@ -173,12 +236,17 @@ func RunCheck(check config.Check) (bool, string, error) {
 		}
 	}
 	*/
+	// Wrap the command so PATH is always augmented — this survives sudo's
+	// env_reset / secure_path (openSUSE's secure_path omits /usr/sbin, which
+	// otherwise makes `sysctl` and friends exit 127 under sudo).
+	wrapped := wrapWithPath(check.Command)
 	var cmd *exec.Cmd
 	if check.Sudo {
-		cmd = exec.Command("sudo", "sh", "-c", check.Command)
+		cmd = exec.Command("sudo", "sh", "-c", wrapped)
 	} else {
-		cmd = exec.Command("sh", "-c", check.Command)
+		cmd = exec.Command("sh", "-c", wrapped)
 	}
+	cmd.Env = HardenerCmdEnv()
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -235,12 +303,14 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 		useSudo = *check.FixSudo
 	}
 
+	wrapped := wrapWithPath(cmdStr)
 	var cmd *exec.Cmd
 	if useSudo {
-		cmd = exec.Command("sudo", "sh", "-c", cmdStr)
+		cmd = exec.Command("sudo", "sh", "-c", wrapped)
 	} else {
-		cmd = exec.Command("sh", "-c", cmdStr)
+		cmd = exec.Command("sh", "-c", wrapped)
 	}
+	cmd.Env = HardenerCmdEnv()
 
 	var out bytes.Buffer
 	cmd.Stdout = &out

@@ -18,9 +18,15 @@ import (
 )
 
 func PreBackup(filePath string) (oldContent []byte, origPerm fs.FileMode, err error) {
-	info, err := os.Stat(filePath)
 	perm := fs.FileMode(0644)
 
+	// Treat "no path" (empty, N/A, or a prose descriptor like "System service
+	// runtime") the same as a missing file — nothing to back up.
+	if filePath == "" || filePath == "N/A" || !strings.HasPrefix(filePath, "/") {
+		return nil, perm, nil
+	}
+
+	info, err := os.Stat(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, perm, nil
@@ -95,7 +101,12 @@ func initializeRuns(deltaFile string) (map[string][]config.DeltaEntry, error) {
 }
 
 func PostDelta(ctx *config.ExecContext, filePath string, oldContent []byte, origPerm fs.FileMode, check config.Check) error {
-	if filePath == "" || filePath == "N/A" {
+	// Skip anything that isn't an actual absolute filesystem path. Some
+	// ruleset entries use prose values like "System service runtime" or
+	// "Kernel runtime status" as affected_file for checks that don't touch
+	// a file — treat those the same as "N/A" so the fix isn't reported as
+	// failed just because we can't back up a non-existent path.
+	if filePath == "" || filePath == "N/A" || !strings.HasPrefix(filePath, "/") {
 		return nil
 	}
 	// try normal read

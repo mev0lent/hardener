@@ -168,7 +168,11 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 
 	// Distro detection happens after both loading paths so ctx is always set.
 	ctx.DistroName = config.DetectDistro()
+	ctx.DistroFamily = config.DetectDistroFamily()
 	distroInfo := fmt.Sprintf("Distro: %s", ctx.DistroName)
+	if len(ctx.DistroFamily) > 1 {
+		distroInfo += fmt.Sprintf(" (family: %s)", strings.Join(ctx.DistroFamily[1:], ","))
+	}
 	if ctx.Profile != "" {
 		distroInfo += fmt.Sprintf(" | Profile: %s", ctx.Profile)
 	}

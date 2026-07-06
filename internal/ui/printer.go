@@ -72,8 +72,8 @@ func PrintSkipped(id string) {
 	fmt.Println(Info(msg))
 }
 
-func PrintSkippedMissing(id, command string) {
-	msg := fmt.Sprintf("[> SKIPPED]: %s | Required command %q not found on this system.\n", id, command)
+func PrintSkippedMissing(id, resource string) {
+	msg := fmt.Sprintf("[> SKIPPED]: %s | Required resource %q not present on this system.\n", id, resource)
 	fmt.Println(Info(msg))
 }
 

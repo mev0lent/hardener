@@ -10,7 +10,10 @@ DISTROS = {
   "ubuntu"    => { box: "bento/ubuntu-24.04",  pkg_cmd: "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ufw openssh-server auditd aide" },
   "debian"    => { box: "generic/debian12",    pkg_cmd: "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' ufw openssh-server auditd aide" },
   "rocky"     => { box: "bento/rockylinux-9",  pkg_cmd: "dnf install -y firewalld openssh-server audit aide" },
-  "opensuse"  => { box: "opensuse/Leap-15.6.x86_64", pkg_cmd: "zypper --non-interactive install firewalld openssh audit aide" },
+  "opensuse"  => { box: "opensuse/Leap-15.6.x86_64", pkg_cmd: "zypper --non-interactive install firewalld openssh audit aide chrony" },
+  # Note: aide is only in the AUR on Arch, not core/extra repos. If you want to
+  # exercise the aide-package-installed check on Arch, install it separately
+  # via an AUR helper (yay/paru) or expect the check to fail as a real gap.
   "archlinux" => { box: "generic/arch",        pkg_cmd: "pacman -Sy --noconfirm archlinux-keyring && pacman -Syu --noconfirm ufw openssh audit" },
   "rhel" => { box: "generic/rhel9", pkg_cmd: "dnf install -y epel-release && dnf makecache && dnf install -y firewalld openssh-server audit" },
   "fedora"    => { box: "bento/fedora-latest",  pkg_cmd: "dnf install -y firewalld openssh-server audit aide" },

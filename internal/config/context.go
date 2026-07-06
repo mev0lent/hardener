@@ -7,10 +7,13 @@ type ExecContext struct {
 	OSName        string
 	ArchName      string
 	DistroName    string
-	Profile       string
-	Labels        []string
-	Timestamp     string
-	Extra         map[string]interface{}
+	// DistroFamily is the ordered chain [ID, ID_LIKE...] used to resolve
+	// distro overrides in rulesets (e.g. ["ubuntu", "debian"]).
+	DistroFamily []string
+	Profile      string
+	Labels       []string
+	Timestamp    string
+	Extra        map[string]interface{}
 }
 
 // Create a new context

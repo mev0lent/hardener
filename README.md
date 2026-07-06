@@ -152,19 +152,40 @@ Every check has a `security_level` field (`baseline`, `medium`, `high`). Only ch
 
 ### Distro-specific overrides
 
-Checks can carry a `distro:` map to override `command`, `fix`, `expected`, `sudo`, or `fix_sudo` for a specific Linux distribution. The key is the lowercase `ID=` value from `/etc/os-release`:
+Checks can carry a `distro:` map to override `command`, `fix`, `expected`, `sudo`, or `fix_sudo` for a specific Linux distribution or distro family. The key is either the lowercase `ID=` value from `/etc/os-release` (e.g. `ubuntu`, `rocky`, `opensuse-leap`, `arch`) or a *family* name derived from `ID_LIKE=` (e.g. `debian`, `rhel`, `suse`, `arch`, `fedora`):
 
 ```yaml
 - id: secure-boot-active
   command: mokutil --sb-state | grep -c enabled
   distro:
-    debian:
+    ubuntu:
       command: |
         if ! command -v mokutil >/dev/null 2>&1; then echo 1
         else mokutil --sb-state | grep -c enabled; fi
+    debian:   # applies to any debian-family distro (Ubuntu, Kali, Mint, ...) as fallback
+      command: |
+        command -v mokutil >/dev/null 2>&1 && mokutil --sb-state | grep -c enabled || echo 1
 ```
 
-If a check has a `distro:` map but the current distro is not listed, the check is skipped with a distinct `skipped_distro` state — it does not count as a failure.
+**Lookup order** (most specific → least):
+
+1. `<distro>-<profile>` (e.g. `ubuntu-server`)
+2. `<family>-<profile>` for each family in the chain (e.g. `debian-server`, `rhel-server`)
+3. `<distro>` (e.g. `ubuntu`)
+4. `<family>` for each family in the chain (e.g. `debian`, `rhel`, `suse`, `arch`)
+
+Family chains are derived from `ID` + `ID_LIKE` in `/etc/os-release`, with a small hand-maintained fallback for distros that ship without `ID_LIKE`:
+
+| Distro                          | Chain                          |
+|---------------------------------|--------------------------------|
+| Ubuntu, Kali, Mint, Pop!_OS     | `<id>, debian`                 |
+| Rocky, AlmaLinux, CentOS, Oracle| `<id>, rhel, fedora`           |
+| RHEL                            | `rhel, fedora`                 |
+| Fedora                          | `fedora, rhel`                 |
+| openSUSE Leap/Tumbleweed, SLES  | `<id>, suse`                   |
+| Manjaro, EndeavourOS, Artix     | `<id>, arch`                   |
+
+If a check has a `distro:` map but no key in the chain matches, the check is skipped with a `skipped_distro` state — it does not count as a failure.
 
 ### Profiles (`--profile`)
 
@@ -207,6 +228,23 @@ A check with `requires_command: <binary>` is silently skipped with a `missing-co
 ```
 
 Missing-command skips appear in suite summaries and are tracked separately from failures.
+
+### `requires_file`
+
+A check with `requires_file: <path>` is skipped with a `missing-command` state when the file does not exist. Useful for checks against distro-specific files that some distros ship without (e.g. `/etc/hosts.allow`, `/etc/login.defs`, `/etc/pam.d/common-password`):
+
+```yaml
+- id: hosts-deny-permissions
+  requires_file: /etc/hosts.deny
+  command: stat -c '%a' /etc/hosts.deny
+  expected: 644
+```
+
+A permission error on `stat` is treated as "file exists but not readable" and does *not* skip the check — only a genuine "no such file" does.
+
+### PATH handling
+
+The runner prepends `/usr/local/sbin`, `/usr/sbin`, and `/sbin` to `PATH` before executing checks and fixes. This makes `sysctl`, `firewall-cmd`, `iptables`, `auditctl`, and similar tools discoverable even on distros (openSUSE, some minimal images) that do not include sbin dirs in a regular user's login `PATH`.
 
 ### `expected_op`
 

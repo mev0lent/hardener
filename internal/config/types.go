@@ -27,29 +27,49 @@ type Check struct {
 	Arch            []string                  `yaml:"arch,omitempty"`
 	Distro          map[string]DistroOverride `yaml:"distro,omitempty"`
 	RequiresCommand string                    `yaml:"requires_command,omitempty"`
-	AffectedFile    string                    `yaml:"affected_file,omitempty"`
-	PostAction      string                    `yaml:"post_action,omitempty"`
-	SecurityLevel   string                    `yaml:"security_level,omitempty"`
-	RiskClass       string                    `yaml:"risk_class,omitempty"`
-	RiskLevel       string                    `yaml:"risk_level,omitempty"`
-	RiskDesc        string                    `yaml:"risk_desc,omitempty"`
+	// RequiresFile skips the check with a missing-command state when the
+	// given path does not exist. Useful for checks that inspect files that
+	// are absent on some distros (e.g. /etc/hosts.allow, /etc/login.defs).
+	RequiresFile  string `yaml:"requires_file,omitempty"`
+	AffectedFile  string `yaml:"affected_file,omitempty"`
+	PostAction    string `yaml:"post_action,omitempty"`
+	SecurityLevel string `yaml:"security_level,omitempty"`
+	RiskClass     string `yaml:"risk_class,omitempty"`
+	RiskLevel     string `yaml:"risk_level,omitempty"`
+	RiskDesc      string `yaml:"risk_desc,omitempty"`
 }
 
 // ResolveForDistro returns a copy of the check with distro-specific overrides applied.
-// It first tries the combined "distro-profile" key (e.g. "debian-server"), then falls
-// back to the distro-only key. Returns false when the check has a distro map but neither
-// key matches — the caller should skip the check in that case.
-func (c Check) ResolveForDistro(distro, profile string) (Check, bool) {
+//
+// Lookup order (most specific → least specific):
+//  1. "<distro>-<profile>" (e.g. "debian-server")
+//  2. "<family>-<profile>" for each family in the chain
+//  3. "<distro>"
+//  4. "<family>" for each family in the chain (e.g. "debian" for Ubuntu,
+//     "rhel" for Rocky, "suse" for openSUSE, "arch" for Manjaro)
+//
+// The distroChain must start with the concrete distro ID; subsequent entries
+// are broader families supplied by DetectDistroFamily(). Returns false when
+// the check has a distro map but no key in the chain matches, so the caller
+// can skip it with a distro_skipped state.
+func (c Check) ResolveForDistro(distroChain []string, profile string) (Check, bool) {
 	if len(c.Distro) == 0 {
 		return c, true // universal check — no distro map
 	}
+	if len(distroChain) == 0 {
+		return c, false
+	}
 	if profile != "" {
-		if ov, ok := c.Distro[distro+"-"+profile]; ok {
-			return applyDistroOverride(c, ov), true
+		for _, d := range distroChain {
+			if ov, ok := c.Distro[d+"-"+profile]; ok {
+				return applyDistroOverride(c, ov), true
+			}
 		}
 	}
-	if ov, ok := c.Distro[distro]; ok {
-		return applyDistroOverride(c, ov), true
+	for _, d := range distroChain {
+		if ov, ok := c.Distro[d]; ok {
+			return applyDistroOverride(c, ov), true
+		}
 	}
 	return c, false
 }

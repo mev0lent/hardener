@@ -124,12 +124,13 @@ $entry"
     echo "$summaries"
 }
 
-# Collect names of commands reported missing (one per line, sorted and unique).
+# Collect names of commands/files reported missing (one per line, sorted, unique).
+# Matches both legacy "Required command" and current "Required resource" wording.
 # Returns comma-separated list or empty string.
 collect_missing_cmds() {
     local output="$1"
     echo "$output" \
-        | grep -oE 'Required command "[^"]+" not found' \
+        | grep -oE 'Required (command|resource) "[^"]+" (not found|not present)' \
         | grep -oE '"[^"]+"' \
         | tr -d '"' \
         | sort -u \
