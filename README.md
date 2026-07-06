@@ -214,7 +214,9 @@ Each suite in a ruleset has a `labels:` list. Use `--label` to run only matching
 ./hardener-linux audit --ruleset ruleset.yaml --label kernel,network
 ```
 
-Available labels in the Linux ruleset: `auth`, `network`, `kernel`, `filesystem`, `boot`, `services`, `audit`, `logging`.
+Available labels in the Linux ruleset: `auth`, `network`, `kernel`, `filesystem`, `boot`, `services`, `audit`, `logging`, `mac`.
+
+The bundled Linux ruleset ships 48 suites / ~131 checks covering: administrative accounts and PAM stack, password policy, faillock and account aging, sudo hardening, screen/session lock, service hardening (Avahi, Bluetooth, CUPS, Samba), firewall, SSH, kernel and network sysctls, IPv6, DNS resolver, `/etc/hosts` sanity, chrony, boot (GRUB/Secure Boot/BIOS), UEFI mode, kernel command line, package integrity (rpm/deb/pacman), single-user mode, USBGuard, `PATH` and umask, mount options, `/proc` hardening, SUID/SGID/orphan audits, polyinstantiated tmp, auditd rules, journald hardening, syslog, cron/at whitelist, systemd service sandboxing, and MAC (SELinux + AppArmor) enforcement.
 
 ### `requires_command`
 
@@ -256,6 +258,21 @@ expected_op: '>='
 ```
 
 Supported operators: `>=`, `>`, `<=`, `<`.
+
+### Reading kernel state
+
+Kernel sysctl checks in the bundled ruleset use `cat /proc/sys/<key>` rather than `sysctl -n <key>`. This has two upsides: (a) it works without `sudo` because `/proc/sys` entries are world-readable, and (b) it sidesteps distros (notably openSUSE Leap) whose sudoers `secure_path` omits `/usr/sbin` and would otherwise return exit code 127. If you author a new sysctl-style check, prefer the `/proc/sys` path for the same reasons.
+
+### Ruleset authoring tips
+
+- Prefer *runtime file detection* over a `distro:` map when the only thing that changes across distros is a filepath. Example — instead of duplicating the check three times for `/etc/pam.d/common-password` (Debian) vs `/etc/pam.d/system-auth` (RHEL/Arch), write:
+  ```yaml
+  command: |
+    f=/etc/pam.d/system-auth; [ -f "$f" ] || f=/etc/pam.d/common-password
+    grep -cE '^\s*password\s+required\s+pam_pwquality.so' "$f"
+  ```
+- Use `requires_command` for optional binaries (`gsettings`, `auditctl`, `mokutil`) and `requires_file` for optional files (`/etc/hosts.allow`, `/etc/pam.d/common-auth`). Both produce a neutral "missing-command" state, not a failure.
+- For "should not be enabled" service checks, pass unless `systemctl is-enabled` returns exactly `enabled` — this treats `disabled`, `masked`, `static`, `indirect`, and missing units all as compliant.
 
 ---
 
