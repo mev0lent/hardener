@@ -76,8 +76,23 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 	}
 
 	if err != nil {
-		result.Output = err.Error()
+		// Keep whatever the command actually produced and attach the error as
+		// context. Replacing the output with the error string made every
+		// failure render as the same "command exited with code 1" line, which
+		// hid the difference between a genuine finding, a broken command, a
+		// permission problem and a failed sudo.
+		if strings.TrimSpace(output) != "" {
+			result.Output = fmt.Sprintf("%s (%v)", output, err)
+		} else {
+			result.Output = err.Error()
+		}
 		passed = false
+		// Defensive: result.Passed was assigned from `passed` above, before
+		// this branch could clear it. RunCheck never returns a non-nil error
+		// together with passed==true today, so this is not currently
+		// reachable, but keeping the two in sync means a future error path
+		// that does cannot silently report a failing check as PASSED.
+		result.Passed = false
 	}
 
 	if !passed && mode == ModeFix && strings.TrimSpace(check.Fix) != "" {

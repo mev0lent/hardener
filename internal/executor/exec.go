@@ -248,12 +248,18 @@ func RunCheck(check config.Check) (bool, string, error) {
 	}
 	cmd.Env = HardenerCmdEnv()
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	// stdout and stderr are captured separately. Only stdout is compared
+	// against `expected`: a diagnostic line such as
+	// "grep: /etc/modprobe.d/x.conf: Permission denied" is not part of the
+	// value the check produces, and merging it into the same buffer made any
+	// check that touched an unreadable path fail regardless of system state.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	output := strings.TrimSpace(out.String())
+	output := strings.TrimSpace(stdout.String())
+	errOutput := strings.TrimSpace(stderr.String())
 	exitCode := 0
 
 	if err != nil {
@@ -261,7 +267,7 @@ func RunCheck(check config.Check) (bool, string, error) {
 			exitCode = exitErr.ExitCode()
 		} else {
 			// non-exit errors, e.g., command not found
-			return false, output, fmt.Errorf("command failed to start: %w", err)
+			return false, output, fmt.Errorf("command failed to start: %w%s", err, stderrSuffix(errOutput))
 		}
 	}
 
@@ -274,11 +280,31 @@ func RunCheck(check config.Check) (bool, string, error) {
 
 	// Any other non-zero exit code = real error
 	if exitCode != 0 {
-		return false, output, fmt.Errorf("command exited with code %d", exitCode)
+		return false, output, fmt.Errorf("command exited with code %d%s", exitCode, stderrSuffix(errOutput))
 	}
 
 	passed := compareExpected(output, check.Expected, check.ExpectedOp)
 	return passed, output, nil
+}
+
+// stderrSuffix renders captured stderr as trailing diagnostic context for an
+// error message. Returns "" when the command wrote nothing to stderr, so that
+// error strings stay unchanged in the common case.
+func stderrSuffix(stderr string) string {
+	if stderr == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (stderr: %s)", singleLine(stderr))
+}
+
+// singleLine collapses multi-line output so a report line stays readable.
+// Only the first 3 lines are kept; the rest are summarised.
+func singleLine(s string) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > 3 {
+		return strings.Join(lines[:3], "; ") + fmt.Sprintf("; ... (+%d more)", len(lines)-3)
+	}
+	return strings.Join(lines, "; ")
 }
 
 // RunFix executes the fix for a check and safely handles errors.
@@ -312,9 +338,11 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 	}
 	cmd.Env = HardenerCmdEnv()
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	// Captured separately for the same reason as in RunCheck. For a fix both
+	// streams are worth showing, so they are recombined only for display.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	// Backup file before applying fix
 	oldContent, origPerm, backupErr := rollback.PreBackup(check.AffectedFile)
@@ -324,7 +352,14 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 
 	// Run the fix command
 	runErr := cmd.Run()
-	output = strings.TrimSpace(out.String())
+	output = strings.TrimSpace(stdout.String())
+	if e := strings.TrimSpace(stderr.String()); e != "" {
+		if output == "" {
+			output = e
+		} else {
+			output = output + "\n" + e
+		}
+	}
 
 	// Backup already saved? Good, continue even if command had issues
 	if err := rollback.PostDelta(ctx, check.AffectedFile, oldContent, origPerm, check); err != nil {
