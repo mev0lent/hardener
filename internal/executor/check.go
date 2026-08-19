@@ -68,12 +68,6 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 	}
 
 	passed, output, err := RunCheck(check)
-	result := config.CheckResult{
-		ID:          check.ID,
-		Description: check.Description,
-		Passed:      passed,
-		Output:      output,
-	}
 
 	if err != nil {
 		// Keep whatever the command actually produced and attach the error as
@@ -82,17 +76,20 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 		// hid the difference between a genuine finding, a broken command, a
 		// permission problem and a failed sudo.
 		if strings.TrimSpace(output) != "" {
-			result.Output = fmt.Sprintf("%s (%v)", output, err)
+			output = fmt.Sprintf("%s (%v)", output, err)
 		} else {
-			result.Output = err.Error()
+			output = err.Error()
 		}
 		passed = false
-		// Defensive: result.Passed was assigned from `passed` above, before
-		// this branch could clear it. RunCheck never returns a non-nil error
-		// together with passed==true today, so this is not currently
-		// reachable, but keeping the two in sync means a future error path
-		// that does cannot silently report a failing check as PASSED.
-		result.Passed = false
+	}
+
+	// Built after the error branch, so Passed and Output are each assigned
+	// exactly once and cannot drift apart.
+	result := config.CheckResult{
+		ID:          check.ID,
+		Description: check.Description,
+		Passed:      passed,
+		Output:      output,
 	}
 
 	if !passed && mode == ModeFix && strings.TrimSpace(check.Fix) != "" {

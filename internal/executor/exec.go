@@ -288,23 +288,20 @@ func RunCheck(check config.Check) (bool, string, error) {
 }
 
 // stderrSuffix renders captured stderr as trailing diagnostic context for an
-// error message. Returns "" when the command wrote nothing to stderr, so that
-// error strings stay unchanged in the common case.
+// error message. Returns "" when the command wrote nothing to stderr, so error
+// strings are unchanged in the common case. Multi-line stderr is collapsed to
+// its first three lines, so that one unreadable directory cannot turn a single
+// finding into a forty-line report entry.
 func stderrSuffix(stderr string) string {
 	if stderr == "" {
 		return ""
 	}
-	return fmt.Sprintf(" (stderr: %s)", singleLine(stderr))
-}
-
-// singleLine collapses multi-line output so a report line stays readable.
-// Only the first 3 lines are kept; the rest are summarised.
-func singleLine(s string) string {
-	lines := strings.Split(s, "\n")
+	lines := strings.Split(stderr, "\n")
 	if len(lines) > 3 {
-		return strings.Join(lines[:3], "; ") + fmt.Sprintf("; ... (+%d more)", len(lines)-3)
+		return fmt.Sprintf(" (stderr: %s; ... +%d more)",
+			strings.Join(lines[:3], "; "), len(lines)-3)
 	}
-	return strings.Join(lines, "; ")
+	return fmt.Sprintf(" (stderr: %s)", strings.Join(lines, "; "))
 }
 
 // RunFix executes the fix for a check and safely handles errors.
@@ -338,11 +335,13 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 	}
 	cmd.Env = HardenerCmdEnv()
 
-	// Captured separately for the same reason as in RunCheck. For a fix both
-	// streams are worth showing, so they are recombined only for display.
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// A fix's output is only ever displayed, never compared against `expected`
+	// (compareExpected is called from RunCheck alone), so both streams share one
+	// buffer here on purpose: that preserves the chronological interleaving of
+	// normal output and diagnostics, which is what makes a failed fix readable.
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 
 	// Backup file before applying fix
 	oldContent, origPerm, backupErr := rollback.PreBackup(check.AffectedFile)
@@ -352,14 +351,7 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 
 	// Run the fix command
 	runErr := cmd.Run()
-	output = strings.TrimSpace(stdout.String())
-	if e := strings.TrimSpace(stderr.String()); e != "" {
-		if output == "" {
-			output = e
-		} else {
-			output = output + "\n" + e
-		}
-	}
+	output = strings.TrimSpace(out.String())
 
 	// Backup already saved? Good, continue even if command had issues
 	if err := rollback.PostDelta(ctx, check.AffectedFile, oldContent, origPerm, check); err != nil {
