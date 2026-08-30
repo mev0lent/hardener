@@ -123,6 +123,37 @@ GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-macos .
 ```bash
 ./hardener-macos rollback --latest
 ```
+---
+
+## Verifying a Release
+
+[#verifying-a-release](#verifying-a-release)
+
+Every tagged release publishes a SHA-256 checksum alongside the built
+binary. Before running Hardener under elevated privileges, verify that
+your local binary matches the released one:
+
+**Linux / macOS:**
+
+```bash
+sha256sum -c hardener.sha256
+# expected output: hardener: OK
+```
+
+**Windows (PowerShell):**
+
+```powershell
+(Get-FileHash .\hardener -Algorithm SHA256).Hash.ToLower() `
+  -eq (Get-Content .\hardener.sha256).Split(' ')[0]
+# expected output: True
+```
+
+If the check fails, the binary in your working directory does not match
+the tagged release; do not run it with elevated privileges. Report the
+discrepancy in an issue.
+
+Release assets (binary and `hardener.sha256`) are attached to each entry
+under the [Releases](https://github.com/mev0lent/hardener/releases) page.
 
 ---
 
