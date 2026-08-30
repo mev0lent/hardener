@@ -2,6 +2,7 @@ package rollback
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -224,58 +225,65 @@ func filterRollbackFiles(entries []config.DeltaEntry, files []string) []config.D
 func applyDelta(ctx *config.ExecContext, entries []config.DeltaEntry) error {
 	var errs []error
 
-	// 1. LIFO (Last-In, First-Out): Neueste Änderungen zuerst zurückrollen
+	// LIFO (Last-In, First-Out): reverse deltas in the opposite order of the
+	// original applications. Required when the same file was modified by
+	// multiple suites within one run, so the compositional post-fix state
+	// unwinds correctly back to the pre-fix state.
 	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
 		entries[i], entries[j] = entries[j], entries[i]
 	}
 
-	for _, entry := range entries {
+	for idx, entry := range entries {
+		// Read the current on-disk content — for the first iteration this is
+		// the post-fix content; for later iterations it is the intermediate
+		// state produced by earlier reverses in this loop.
 		fileContent, err := readFileContent(entry.FilePath)
 		if err != nil {
 			errs = append(errs, ui.ReturnError("failed to read file "+entry.FilePath, err))
 			continue
 		}
 
-		oldContent, err := ApplyRollbackDelta(string(fileContent), entry.Delta)
+		// Reverse this suite's delta.  ComputeDelta stored diff(post -> pre)
+		// for this suite's PreBackup snapshot, so applying it to the current
+		// content walks one step closer to the original pre-fix state.
+		targetContent, err := ApplyRollbackDelta(string(fileContent), entry.Delta)
 		if err != nil {
 			errs = append(errs, ui.ReturnError("failed to apply rollback delta for "+entry.FilePath, err))
 			continue
 		}
 
-		tmpFile := entry.FilePath + ".tmp"
-		f, err := os.Create(tmpFile)
-		if err != nil {
-			if errors.Is(err, os.ErrPermission) {
-				ui.PrintInfo(fmt.Sprintf("Elevating: using sudo direct write for %s", entry.FilePath))
-				if err := WriteFileMaybeSudo(entry.FilePath, []byte(oldContent), fs.FileMode(entry.Perm)); err != nil {
-					errs = append(errs, ui.ReturnError("sudo write failed for "+entry.FilePath, err))
-				}
-				continue
-			}
-			errs = append(errs, ui.ReturnError("failed to create temp file for "+entry.FilePath, err))
+		// Fidelity assertion — the invariant that hypothesis H5 in the term
+		// paper predicts.  entry.Checksum was recorded as sha256(pre-fix)
+		// when PostDelta stored the entry; the reverse-patch result must
+		// match it.  If it does not, the delta application produced wrong
+		// output and we MUST NOT write it to disk, otherwise the on-disk
+		// state silently drifts from what the rollback claims to restore.
+		actualHash := fmt.Sprintf("%x", sha256.Sum256([]byte(targetContent)))
+		if entry.Checksum != "" && actualHash != entry.Checksum {
+			errs = append(errs, ui.ReturnError(
+				fmt.Sprintf("rollback fidelity failure for %s (entry %d/%d): "+
+					"reverse-patch produced sha256=%s but expected %s; "+
+					"aborting write to prevent silent corruption",
+					entry.FilePath, idx+1, len(entries),
+					shortHash(actualHash), shortHash(entry.Checksum)),
+				errors.New("hash mismatch")))
 			continue
 		}
 
-		_, _ = f.Write([]byte(oldContent))
-		_ = f.Close()
-
-		if renameErr := os.Rename(tmpFile, entry.FilePath); renameErr != nil {
-			if errors.Is(renameErr, os.ErrPermission) {
-				ui.PrintInfo(fmt.Sprintf("Elevating: using sudo fallback for %s", entry.FilePath))
-				if err := WriteFileMaybeSudo(entry.FilePath, []byte(oldContent), fs.FileMode(entry.Perm)); err != nil {
-					errs = append(errs, ui.ReturnError("sudo write failed for "+entry.FilePath, err))
-				}
-				_ = os.Remove(tmpFile)
-				continue
-			}
-			errs = append(errs, ui.ReturnError("failed to replace "+entry.FilePath, renameErr))
-			_ = os.Remove(tmpFile)
+		// Skip the write if the current content already matches — happens on
+		// identity deltas (pre == post) and avoids unnecessary I/O and sudo
+		// prompts.  Report it so the operator can see the no-op explicitly.
+		currentHash := fmt.Sprintf("%x", sha256.Sum256(fileContent))
+		if currentHash == actualHash {
+			ui.PrintInfo(fmt.Sprintf("no-op rollback for %s (already at pre-fix state)", entry.FilePath))
 			continue
 		}
 
-		// Berechtigungen erzwingen (SUID Bit!)
-		_ = RestorePermissions(entry.FilePath, fs.FileMode(entry.Perm))
-		ui.PrintInfo(fmt.Sprintf("restored %s successfully", entry.FilePath))
+		if werr := writeRollbackTarget(entry, []byte(targetContent)); werr != nil {
+			errs = append(errs, werr)
+			continue
+		}
+		ui.PrintInfo(fmt.Sprintf("restored %s (sha256=%s)", entry.FilePath, shortHash(actualHash)))
 	}
 
 	if len(errs) > 0 {
@@ -283,11 +291,66 @@ func applyDelta(ctx *config.ExecContext, entries []config.DeltaEntry) error {
 		return fmt.Errorf("rollback finished with %d error(s)", len(errs))
 	}
 
-	// 2. Live-Status Synchronisation
+	// Live-state synchronisation for subsystems that need a reload after
+	// their persistent configuration was restored.
 	executePostRollbackHooks(entries)
 
 	ui.PrintSummary("Rollback completed successfully")
 	return nil
+}
+
+// writeRollbackTarget atomically writes the reversed content back to the
+// on-disk file, elevating via sudo where necessary.  Extracted from
+// applyDelta so the fidelity-assertion path above stays readable.
+func writeRollbackTarget(entry config.DeltaEntry, data []byte) error {
+	tmpFile := entry.FilePath + ".tmp"
+	f, err := os.Create(tmpFile)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			ui.PrintInfo(fmt.Sprintf("Elevating: using sudo direct write for %s", entry.FilePath))
+			if werr := WriteFileMaybeSudo(entry.FilePath, data, fs.FileMode(entry.Perm)); werr != nil {
+				return ui.ReturnError("sudo write failed for "+entry.FilePath, werr)
+			}
+			return nil
+		}
+		return ui.ReturnError("failed to create temp file for "+entry.FilePath, err)
+	}
+
+	if _, werr := f.Write(data); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+		return ui.ReturnError("failed to write temp file for "+entry.FilePath, werr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		_ = os.Remove(tmpFile)
+		return ui.ReturnError("failed to close temp file for "+entry.FilePath, closeErr)
+	}
+
+	if renameErr := os.Rename(tmpFile, entry.FilePath); renameErr != nil {
+		if errors.Is(renameErr, os.ErrPermission) {
+			ui.PrintInfo(fmt.Sprintf("Elevating: using sudo fallback for %s", entry.FilePath))
+			if werr := WriteFileMaybeSudo(entry.FilePath, data, fs.FileMode(entry.Perm)); werr != nil {
+				_ = os.Remove(tmpFile)
+				return ui.ReturnError("sudo write failed for "+entry.FilePath, werr)
+			}
+			_ = os.Remove(tmpFile)
+			return nil
+		}
+		_ = os.Remove(tmpFile)
+		return ui.ReturnError("failed to replace "+entry.FilePath, renameErr)
+	}
+
+	_ = RestorePermissions(entry.FilePath, fs.FileMode(entry.Perm))
+	return nil
+}
+
+// shortHash returns the first 16 characters of a hex hash for compact
+// diagnostic output.  Full hash comparisons happen on the untrimmed value.
+func shortHash(h string) string {
+	if len(h) <= 16 {
+		return h
+	}
+	return h[:16] + "..."
 }
 
 func executePostRollbackHooks(entries []config.DeltaEntry) {
