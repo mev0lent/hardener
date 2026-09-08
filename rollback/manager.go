@@ -6,164 +6,137 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hardener/internal/config"
-	"hardener/internal/ui"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
+
+	"hardener/internal/config"
+	"hardener/internal/ui"
 )
 
-func PreBackup(filePath string) (oldContent []byte, origPerm fs.FileMode, err error) {
-	perm := fs.FileMode(0644)
+const backupModeMask = fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
 
-	// Treat "no path" (empty, N/A, or a prose descriptor like "System service
-	// runtime") the same as a missing file — nothing to back up.
-	if filePath == "" || filePath == "N/A" || !strings.HasPrefix(filePath, "/") {
+// Rulesets may use prose such as "System service runtime" for non-file checks.
+func isBackupPath(path string) bool {
+	return filepath.IsAbs(path)
+}
+
+func PreBackup(filePath string) ([]byte, fs.FileMode, error) {
+	perm := fs.FileMode(0644)
+	if !isBackupPath(filePath) {
 		return nil, perm, nil
 	}
 
 	info, err := os.Stat(filePath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, perm, nil
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, perm, nil
+	case errors.Is(err, os.ErrPermission):
+		perm = 0600
+	case err != nil:
+		return nil, 0, fmt.Errorf("stat backup file %s: %w", filePath, err)
+	default:
+		if !info.Mode().IsRegular() {
+			return nil, 0, fmt.Errorf("backup path %s is not a regular file", filePath)
 		}
-		if errors.Is(err, os.ErrPermission) {
-			perm = 0600
-		} else {
-			return nil, 0, err
-		}
-	} else {
-		// SUID/SGID/Sticky Bits maskieren
-		perm = info.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
+		perm = info.Mode() & backupModeMask
 	}
 
 	data, err := readFileContent(filePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, perm, nil
+	}
 	if err != nil {
-		if strings.Contains(err.Error(), "No such file") {
-			return nil, perm, nil
-		}
 		return nil, 0, err
 	}
-
 	return data, perm, nil
 }
 
-func readFileContent(filePath string) (content []byte, err error) {
-	newContent, err := os.ReadFile(filePath)
-	if errors.Is(err, os.ErrPermission) {
-		cmd := exec.Command("sudo", "cat", filePath)
-		data, cmdErr := cmd.Output()
-		if cmdErr != nil {
-			return nil, fmt.Errorf("(even) sudo read failed: %w", cmdErr)
-		}
-		return data, nil
+func readFileContent(filePath string) ([]byte, error) {
+	data, err := os.ReadFile(filePath)
+	if !errors.Is(err, os.ErrPermission) {
+		return data, err
 	}
-	return newContent, err
+
+	cmd := exec.Command("sudo", "cat", filePath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	data, err = cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("sudo read %s: %w (%s)", filePath, err, strings.TrimSpace(stderr.String()))
+	}
+	return data, nil
 }
 
 func createEntry(ctx *config.ExecContext, filePath, checksum, delta string, perm fs.FileMode) (config.DeltaEntry, string, error) {
 	if filePath == "" || checksum == "" {
-		return config.DeltaEntry{}, "", ui.ReturnError("", fmt.Errorf("filePath or checksum is empty"))
+		return config.DeltaEntry{}, "", errors.New("filePath or checksum is empty")
 	}
-
 	ts := time.Now().UTC().Format(time.RFC3339)
-	entry := config.DeltaEntry{
+	return config.DeltaEntry{
 		RunID:     ctx.RunID,
 		Timestamp: ts,
 		FilePath:  filePath,
 		Checksum:  checksum,
 		Delta:     delta,
-		Perm:      uint32(perm),
-	}
-	return entry, ts, nil
+		Perm:      uint32(perm & backupModeMask),
+	}, ts, nil
 }
 
 func initializeRuns(deltaFile string) (map[string][]config.DeltaEntry, error) {
-	var runs map[string][]config.DeltaEntry
-
+	runs := make(map[string][]config.DeltaEntry)
 	data, err := os.ReadFile(deltaFile)
-	if err != nil || len(data) == 0 {
-		// No file yet → initialize
-		return make(map[string][]config.DeltaEntry), nil
+	if errors.Is(err, os.ErrNotExist) {
+		return runs, nil
 	}
-
-	// Try to unmarshal existing data
+	if err != nil {
+		return runs, fmt.Errorf("read %s: %w", deltaFile, err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return runs, nil
+	}
 	if err := json.Unmarshal(data, &runs); err != nil {
-		// corrupted JSON → return empty and propagate error
-		return make(map[string][]config.DeltaEntry), fmt.Errorf("failed to parse runs.json: %w", err)
+		return make(map[string][]config.DeltaEntry), fmt.Errorf("parse %s: %w", deltaFile, err)
 	}
-
+	// JSON null must not leave a nil map for PostDelta to append to.
+	if runs == nil {
+		runs = make(map[string][]config.DeltaEntry)
+	}
 	return runs, nil
 }
 
-func PostDelta(ctx *config.ExecContext, filePath string, oldContent []byte, origPerm fs.FileMode, check config.Check) error {
-	// Skip anything that isn't an actual absolute filesystem path. Some
-	// ruleset entries use prose values like "System service runtime" or
-	// "Kernel runtime status" as affected_file for checks that don't touch
-	// a file — treat those the same as "N/A" so the fix isn't reported as
-	// failed just because we can't back up a non-existent path.
-	if filePath == "" || filePath == "N/A" || !strings.HasPrefix(filePath, "/") {
+func PostDelta(ctx *config.ExecContext, filePath string, oldContent []byte, origPerm fs.FileMode, _ config.Check) error {
+	if !isBackupPath(filePath) {
 		return nil
 	}
-	// try normal read
 	newContent, err := readFileContent(filePath)
 	if err != nil {
-		return ui.ReturnError("", err)
-	}
-
-	// compute delta (rollback direction)
-	delta, checksum := ComputeDelta(string(newContent), string(oldContent))
-
-	// create metadata entry
-	entry, _, err := createEntry(ctx, filePath, checksum, delta, origPerm)
-	if err != nil {
-		return ui.ReturnError("", err)
+		return fmt.Errorf("read post-fix file %s: %w", filePath, err)
 	}
 
 	deltaFile := filepath.Join(ctx.BaseDir, "runs.json")
-	//ui.PrintInfo(fmt.Sprintf("Delta file created: %s", deltaFile))
 	runs, err := initializeRuns(deltaFile)
 	if err != nil {
-		ui.PrintErrorMessage(fmt.Sprintf("warning: %v", err))
+		// Never overwrite existing history when reading or decoding it fails.
+		return err
 	}
-
-	// Timestamp is the key
+	delta, checksum := ComputeDelta(string(newContent), string(oldContent))
+	entry, _, err := createEntry(ctx, filePath, checksum, delta, origPerm)
+	if err != nil {
+		return err
+	}
 	runs[ctx.RunID] = append(runs[ctx.RunID], entry)
 
-	// Write back atomically
-	tmpFile := deltaFile + ".tmp"
-	f, err := os.Create(tmpFile)
+	data, err := json.MarshalIndent(runs, "", "  ")
 	if err != nil {
-		return ui.ReturnError("failed to create temp file", err)
+		return fmt.Errorf("encode rollback history: %w", err)
 	}
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-
-	encodeErr := enc.Encode(runs)
-	if encodeErr != nil {
-		err := f.Close()
-		if err != nil {
-			return err
-		}
-		return ui.ReturnError("failed to encode runs", encodeErr)
-	}
-
-	if closeErr := f.Close(); closeErr != nil {
-		return closeErr
-	}
-
-	if renameErr := os.Rename(tmpFile, deltaFile); renameErr != nil {
-		return ui.ReturnError("failed to replace runs file", renameErr)
-	}
-	//ui.PrintInfo("runs.json created")
-
-	return nil
+	// Backups may contain sensitive configuration; restrict history access.
+	return writeFileAtomic(deltaFile, append(data, '\n'), 0600)
 }
 
 func ApplyRun(ctx *config.ExecContext, files []string) error {
@@ -171,230 +144,185 @@ func ApplyRun(ctx *config.ExecContext, files []string) error {
 	ui.PrintInfo(fmt.Sprintf("Looking up delta file: %s", deltaFile))
 	runs, err := initializeRuns(deltaFile)
 	if err != nil {
-		return ui.ReturnError("runs.json is corrupted and cannot be read — rollback aborted", err)
+		return fmt.Errorf("rollback aborted: %w", err)
 	}
-	// pick target timestamp
-	target := ctx.Timestamp // set via CLI or fallback
+
+	target := ctx.Timestamp
 	if target == "" {
-		// no timestamp provided → pick latest
-		var newest string
+		// Generated RunIDs are UTC RFC3339 timestamps and sort chronologically.
 		for runID := range runs {
-			if runID > newest { // Lexicographical sort works for RFC3339
-				newest = runID
+			if runID > target {
+				target = runID
 			}
 		}
-		target = newest
 	}
-
 	entries := runs[target]
-
 	if len(entries) == 0 {
-		return ui.ReturnError("", errors.New("no runs found"))
+		return fmt.Errorf("no rollback entries found for run %q", target)
 	}
-
-	if len(files) == 0 {
-		err = applyDelta(ctx, entries)
-		if err != nil {
-			return ui.ReturnError("", err)
-		}
-
-	} else {
+	if len(files) > 0 {
 		entries = filterRollbackFiles(entries, files)
 		if len(entries) == 0 {
-			ui.PrintErrorMessage("no matching files found in current run")
+			ui.PrintInfo("No matching files found in selected run")
 			return nil
 		}
-		err = applyDelta(ctx, entries)
-		if err != nil {
-			return ui.ReturnError("", err)
-		}
 	}
-	return nil
+	return applyDelta(ctx, entries)
 }
 
 func filterRollbackFiles(entries []config.DeltaEntry, files []string) []config.DeltaEntry {
+	wanted := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		wanted[file] = struct{}{}
+	}
 	var filtered []config.DeltaEntry
 	for _, entry := range entries {
-		if slices.Contains(files, entry.FilePath) {
+		if _, ok := wanted[entry.FilePath]; ok {
 			filtered = append(filtered, entry)
 		}
 	}
 	return filtered
 }
 
-func applyDelta(ctx *config.ExecContext, entries []config.DeltaEntry) error {
+func applyDelta(_ *config.ExecContext, entries []config.DeltaEntry) error {
 	var errs []error
+	failedFiles := make(map[string]bool)
 
-	// LIFO (Last-In, First-Out): reverse deltas in the opposite order of the
-	// original applications. Required when the same file was modified by
-	// multiple suites within one run, so the compositional post-fix state
-	// unwinds correctly back to the pre-fix state.
-	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
-		entries[i], entries[j] = entries[j], entries[i]
+	// Walk backwards without changing the caller's slice. Older deltas depend
+	// on newer ones having succeeded, so stop a file's chain after a failure.
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if failedFiles[entry.FilePath] {
+			continue
+		}
+		if err := restoreEntry(entry); err != nil {
+			failedFiles[entry.FilePath] = true
+			errs = append(errs, err)
+			ui.PrintErrorMessage(err.Error())
+		}
 	}
-
-	for idx, entry := range entries {
-		// Read the current on-disk content — for the first iteration this is
-		// the post-fix content; for later iterations it is the intermediate
-		// state produced by earlier reverses in this loop.
-		fileContent, err := readFileContent(entry.FilePath)
-		if err != nil {
-			errs = append(errs, ui.ReturnError("failed to read file "+entry.FilePath, err))
-			continue
-		}
-
-		// Reverse this suite's delta.  ComputeDelta stored diff(post -> pre)
-		// for this suite's PreBackup snapshot, so applying it to the current
-		// content walks one step closer to the original pre-fix state.
-		targetContent, err := ApplyRollbackDelta(string(fileContent), entry.Delta)
-		if err != nil {
-			errs = append(errs, ui.ReturnError("failed to apply rollback delta for "+entry.FilePath, err))
-			continue
-		}
-
-		// Fidelity assertion — the invariant that hypothesis H5 in the term
-		// paper predicts.  entry.Checksum was recorded as sha256(pre-fix)
-		// when PostDelta stored the entry; the reverse-patch result must
-		// match it.  If it does not, the delta application produced wrong
-		// output and we MUST NOT write it to disk, otherwise the on-disk
-		// state silently drifts from what the rollback claims to restore.
-		actualHash := fmt.Sprintf("%x", sha256.Sum256([]byte(targetContent)))
-		if entry.Checksum != "" && actualHash != entry.Checksum {
-			errs = append(errs, ui.ReturnError(
-				fmt.Sprintf("rollback fidelity failure for %s (entry %d/%d): "+
-					"reverse-patch produced sha256=%s but expected %s; "+
-					"aborting write to prevent silent corruption",
-					entry.FilePath, idx+1, len(entries),
-					shortHash(actualHash), shortHash(entry.Checksum)),
-				errors.New("hash mismatch")))
-			continue
-		}
-
-		// Skip the write if the current content already matches — happens on
-		// identity deltas (pre == post) and avoids unnecessary I/O and sudo
-		// prompts.  Report it so the operator can see the no-op explicitly.
-		currentHash := fmt.Sprintf("%x", sha256.Sum256(fileContent))
-		if currentHash == actualHash {
-			ui.PrintInfo(fmt.Sprintf("no-op rollback for %s (already at pre-fix state)", entry.FilePath))
-			continue
-		}
-
-		if werr := writeRollbackTarget(entry, []byte(targetContent)); werr != nil {
-			errs = append(errs, werr)
-			continue
-		}
-		ui.PrintInfo(fmt.Sprintf("restored %s (sha256=%s)", entry.FilePath, shortHash(actualHash)))
-	}
-
 	if len(errs) > 0 {
-		ui.PrintErrorSummary("Rollback completed with errors", errs)
-		return fmt.Errorf("rollback finished with %d error(s)", len(errs))
+		return fmt.Errorf("rollback finished with %d error(s): %w", len(errs), errors.Join(errs...))
 	}
-
-	// Live-state synchronisation for subsystems that need a reload after
-	// their persistent configuration was restored.
-	executePostRollbackHooks(entries)
-
+	if err := executePostRollbackHooks(entries); err != nil {
+		return fmt.Errorf("files restored, but live-state synchronization failed: %w", err)
+	}
 	ui.PrintSummary("Rollback completed successfully")
 	return nil
 }
 
-// writeRollbackTarget atomically writes the reversed content back to the
-// on-disk file, elevating via sudo where necessary.  Extracted from
-// applyDelta so the fidelity-assertion path above stays readable.
-func writeRollbackTarget(entry config.DeltaEntry, data []byte) error {
-	tmpFile := entry.FilePath + ".tmp"
-	f, err := os.Create(tmpFile)
+func restoreEntry(entry config.DeltaEntry) error {
+	content, err := readFileContent(entry.FilePath)
 	if err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			ui.PrintInfo(fmt.Sprintf("Elevating: using sudo direct write for %s", entry.FilePath))
-			if werr := WriteFileMaybeSudo(entry.FilePath, data, fs.FileMode(entry.Perm)); werr != nil {
-				return ui.ReturnError("sudo write failed for "+entry.FilePath, werr)
-			}
-			return nil
+		return fmt.Errorf("read rollback file %s: %w", entry.FilePath, err)
+	}
+	target, err := ApplyRollbackDelta(string(content), entry.Delta)
+	if err != nil {
+		return fmt.Errorf("apply rollback delta for %s: %w", entry.FilePath, err)
+	}
+
+	// Check the restored bytes before any write, including sudo fallbacks.
+	targetBytes := []byte(target)
+	actualHash := fmt.Sprintf("%x", sha256.Sum256(targetBytes))
+	if entry.Checksum != "" && actualHash != entry.Checksum {
+		return fmt.Errorf("rollback checksum mismatch for %s: got %s, expected %s; refusing to write",
+			entry.FilePath, actualHash, entry.Checksum)
+	}
+	if bytes.Equal(content, targetBytes) {
+		// Permission-only fixes still need their original mode restored.
+		if err := RestorePermissions(entry.FilePath, fs.FileMode(entry.Perm)); err != nil {
+			return fmt.Errorf("restore permissions for %s: %w", entry.FilePath, err)
 		}
-		return ui.ReturnError("failed to create temp file for "+entry.FilePath, err)
+		ui.PrintInfo(fmt.Sprintf("restored permissions for %s (content unchanged)", entry.FilePath))
+		return nil
 	}
-
-	if _, werr := f.Write(data); werr != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpFile)
-		return ui.ReturnError("failed to write temp file for "+entry.FilePath, werr)
+	if err := writeRollbackTarget(entry, targetBytes); err != nil {
+		return err
 	}
-	if closeErr := f.Close(); closeErr != nil {
-		_ = os.Remove(tmpFile)
-		return ui.ReturnError("failed to close temp file for "+entry.FilePath, closeErr)
-	}
-
-	if renameErr := os.Rename(tmpFile, entry.FilePath); renameErr != nil {
-		if errors.Is(renameErr, os.ErrPermission) {
-			ui.PrintInfo(fmt.Sprintf("Elevating: using sudo fallback for %s", entry.FilePath))
-			if werr := WriteFileMaybeSudo(entry.FilePath, data, fs.FileMode(entry.Perm)); werr != nil {
-				_ = os.Remove(tmpFile)
-				return ui.ReturnError("sudo write failed for "+entry.FilePath, werr)
-			}
-			_ = os.Remove(tmpFile)
-			return nil
-		}
-		_ = os.Remove(tmpFile)
-		return ui.ReturnError("failed to replace "+entry.FilePath, renameErr)
-	}
-
-	_ = RestorePermissions(entry.FilePath, fs.FileMode(entry.Perm))
+	ui.PrintInfo(fmt.Sprintf("restored %s successfully", entry.FilePath))
 	return nil
 }
 
-// shortHash returns the first 16 characters of a hex hash for compact
-// diagnostic output.  Full hash comparisons happen on the untrimmed value.
-func shortHash(h string) string {
-	if len(h) <= 16 {
-		return h
+// Write in the destination directory so rename stays on the same filesystem.
+// Unique temporary names avoid collisions and following a fixed .tmp symlink.
+func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".hardener-*")
+	if err != nil {
+		return fmt.Errorf("create temporary file for %s: %w", path, err)
 	}
-	return h[:16] + "..."
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	defer f.Close()
+
+	if _, err := f.Write(data); err != nil {
+		return fmt.Errorf("write temporary file for %s: %w", path, err)
+	}
+	// Set special mode bits after writing, since a write may clear them.
+	if err := f.Chmod(perm & backupModeMask); err != nil {
+		return fmt.Errorf("set permissions for %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync temporary file for %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temporary file for %s: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return nil
 }
 
-func executePostRollbackHooks(entries []config.DeltaEntry) {
-	needsSysctl, needsSSH, needsAudit, needsReboot := false, false, false, false
-
-	for _, e := range entries {
-		if strings.Contains(e.FilePath, "sysctl") {
-			needsSysctl = true
-			needsReboot = true
-		}
-		if strings.Contains(e.FilePath, "ssh") {
-			needsSSH = true
-		}
-		if strings.Contains(e.FilePath, "audit") {
-			needsAudit = true
-		}
-		if strings.Contains(e.FilePath, "modprobe") {
-			needsReboot = true
-		}
+func writeRollbackTarget(entry config.DeltaEntry, data []byte) error {
+	err := writeFileAtomic(entry.FilePath, data, fs.FileMode(entry.Perm))
+	if !errors.Is(err, os.ErrPermission) {
+		return err
 	}
+	ui.PrintInfo(fmt.Sprintf("Elevating write for %s", entry.FilePath))
+	return WriteFileMaybeSudo(entry.FilePath, data, fs.FileMode(entry.Perm))
+}
 
+func executePostRollbackHooks(entries []config.DeltaEntry) error {
+	var needsSysctl, needsSSH, needsAudit, needsReboot bool
+	for _, entry := range entries {
+		path := entry.FilePath
+		needsSysctl = needsSysctl || strings.Contains(path, "sysctl")
+		needsSSH = needsSSH || strings.Contains(path, "ssh")
+		needsAudit = needsAudit || strings.Contains(path, "audit")
+		needsReboot = needsReboot || strings.Contains(path, "modprobe")
+	}
+	needsReboot = needsReboot || needsSysctl
 	ui.PrintHeader("Synchronizing Live-State")
 
+	var errs []error
+	run := func(args ...string) {
+		output, err := exec.Command("sudo", args...).CombinedOutput()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("sudo %s: %w (%s)",
+				strings.Join(args, " "), err, strings.TrimSpace(string(output))))
+		}
+	}
 	if needsSysctl && runtime.GOOS != "darwin" {
-		_ = exec.Command("sudo", "sysctl", "--system").Run()
+		run("sysctl", "--system")
 	}
 	if needsSSH {
 		if runtime.GOOS == "darwin" {
-			_ = exec.Command("sudo", "launchctl", "kickstart", "-k", "system/com.openssh.sshd").Run()
+			run("launchctl", "kickstart", "-k", "system/com.openssh.sshd")
 		} else {
-			_ = exec.Command("sudo", "systemctl", "restart", "ssh").Run()
+			run("systemctl", "restart", "ssh")
 		}
 	}
 	if needsAudit {
 		if runtime.GOOS == "darwin" {
 			ui.PrintInfo("Audit rules updated: reboot recommended to fully reload on macOS.")
 		} else {
-			_ = exec.Command("sudo", "augenrules", "--load").Run()
+			run("augenrules", "--load")
 		}
 	}
-
 	if needsReboot {
-		ui.PrintErrorMessage("KERNEL ROLLBACK: Reboot required for 100% live-state restoration.")
+		ui.PrintInfo("Kernel configuration restored: reboot required to reload live state.")
 	}
+	return errors.Join(errs...)
 }
 
 func getUnixOctal(perm fs.FileMode) string {
@@ -411,31 +339,36 @@ func getUnixOctal(perm fs.FileMode) string {
 	return fmt.Sprintf("%04o", octal)
 }
 
+// The existing sudo tee fallback is a direct write, not an atomic replacement.
 func WriteFileMaybeSudo(path string, data []byte, perm fs.FileMode) error {
-	err := os.WriteFile(path, data, perm)
-	if err == nil {
-		return nil
-	}
-
-	if errors.Is(err, os.ErrPermission) {
+	err := os.WriteFile(path, data, perm&backupModeMask)
+	if err != nil {
+		if !errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
 		cmd := exec.Command("sudo", "tee", path)
 		cmd.Stdin = bytes.NewReader(data)
-		if cmdErr := cmd.Run(); cmdErr != nil {
-			return fmt.Errorf("sudo write failed: %w", cmdErr)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		// Leave stdout unset so tee cannot print backed-up contents.
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("sudo write %s: %w (%s)", path, err, strings.TrimSpace(stderr.String()))
 		}
-		_ = RestorePermissions(path, perm)
-		return nil
 	}
-	return err
+	if err := RestorePermissions(path, perm); err != nil {
+		return fmt.Errorf("restore permissions for %s: %w", path, err)
+	}
+	return nil
 }
 
 func RestorePermissions(path string, perm fs.FileMode) error {
-	if err := os.Chmod(path, perm); err != nil {
-		if errors.Is(err, os.ErrPermission) {
-			cmd := exec.Command("sudo", "chmod", getUnixOctal(perm), path)
-			return cmd.Run()
-		}
+	err := os.Chmod(path, perm&backupModeMask)
+	if !errors.Is(err, os.ErrPermission) {
 		return err
+	}
+	output, err := exec.Command("sudo", "chmod", getUnixOctal(perm), path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sudo chmod %s: %w (%s)", path, err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
