@@ -94,7 +94,7 @@ runs in one worker, and typed events update the display. `ui.SetLogSink` routes
 messages while the dashboard is open and restores the plain printer afterward.
 The renderer itself never executes a hardening command.
 
-The activity feed retains at most 800 entries and truncates unusually large
+Each category activity feed retains at most 800 entries and truncates unusually large
 messages for display. Command escape sequences are removed before rendering.
 Existing JSON reports retain the executor's result output.
 
@@ -142,3 +142,14 @@ Skipped checks display their explicit reason, falling back to output in older
 reports. Execution errors remain ERROR entries with error details.
 Use audit/fix result JSONs from reports/, not rollback runs.json. Malformed or
 unrelated files are rejected; report imports are limited to 32 MiB.
+
+## Synchronized category activity
+
+Selecting a category switches the right pane to that category's retained logs,
+starting at the top. Each category retains its latest 800 log entries independently.
+New output from other categories does not change the category you are browsing.
+Press f to return to the active category and its newest output. Scrolling the
+activity pane pauses automatic category following too.
+
+Run-wide notices (such as report saving or completion) remain visible in every
+category and carry a [RUN] prefix. Saved-report navigation works as before.

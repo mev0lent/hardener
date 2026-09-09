@@ -231,7 +231,7 @@ func (m model) logWidth() int {
 }
 func (m model) logRows(width int) []string {
 	var rows []string
-	entries := m.logs
+	entries := m.visibleLogs()
 	if m.viewing {
 		entries = m.reportLogs()
 	}
@@ -254,11 +254,17 @@ func (m model) activityView(width, height int) string {
 	if m.focus == 1 {
 		border = blue
 	}
-	mode := "LIVE ↓"
+	mode := "BROWSING"
+	if m.follow && !m.done {
+		mode = "LIVE ↓"
+	}
 	if m.logOffset > 0 {
 		mode = "SCROLLED · f TO FOLLOW"
 	}
 	label := "ACTIVITY"
+	if m.selected >= 0 && m.selected < len(m.suites) {
+		label = m.suites[m.selected].title
+	}
 	if m.viewing {
 		label, mode = "SAVED RESULTS", "↑/↓ SCROLL"
 	}
@@ -269,10 +275,19 @@ func (m model) activityView(width, height int) string {
 	start := max(0, end-visible)
 	body := strings.Join(rows[start:end], "\n")
 	if len(rows) == 0 {
-		body = paint("Waiting for the first check…", muted)
+		body = paint("No activity yet in this category.", muted)
 		if m.viewing {
 			body = paint("No checks recorded in this category.", muted)
 		}
 	}
 	return panel(title+"\n\n"+body, width, height, border)
+}
+
+// Run-wide notices stay visible in every category and are explicitly labelled.
+func (m model) visibleLogs() []logEntry {
+	var entries []logEntry
+	if m.selected >= 0 && m.selected < len(m.suites) {
+		entries = append(entries, m.suites[m.selected].logs...)
+	}
+	return append(entries, m.logs...)
 }

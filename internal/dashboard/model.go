@@ -17,6 +17,7 @@ import (
 const maxLogEntries = 800
 
 type suiteState struct {
+	logs    []logEntry
 	title   string
 	total   int
 	results map[int]config.CheckResult
@@ -135,7 +136,11 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case executor.RunEvent:
 		m.applyEvent(msg)
 	case ui.LogEntry:
-		m.addLog(msg.Level, msg.Message)
+		if m.active >= 0 && !m.suites[m.active].done && !m.done {
+			m.addSuiteLog(m.active, msg.Level, msg.Message)
+		} else {
+			m.addLog(msg.Level, msg.Message)
+		}
 	case finishedMsg:
 		m.done, m.stopping, m.runErr, m.finished = true, msg.stopped, msg.err, time.Now()
 		if msg.err != nil {
@@ -209,8 +214,11 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.logOffset = 0
 			}
 		}
-		if m.viewing && previous != m.selected {
-			m.logOffset = m.reportTopOffset()
+		if previous != m.selected {
+			m.logOffset = 0
+			if !m.follow || m.viewing {
+				m.logOffset = m.reportTopOffset()
+			}
 		}
 	}
 	return m, nil
@@ -221,6 +229,7 @@ func (m *model) scroll(delta int) {
 		m.follow = false
 		m.selected = min(max(0, m.selected+delta), max(0, len(m.suites)-1))
 	} else {
+		m.follow = false
 		m.logOffset = min(max(0, m.logOffset-delta), max(0, len(m.logRows(m.logWidth()))-1))
 	}
 }
@@ -235,10 +244,11 @@ func (m *model) applyEvent(event executor.RunEvent) {
 		m.active = event.SuiteIndex
 		if m.follow {
 			m.selected = m.active
+			m.logOffset = 0
 		}
-		m.addLog("suite", suite.title)
+		m.addSuiteLog(event.SuiteIndex, "suite", suite.title)
 	case executor.CheckStarted:
-		m.addLog("run", event.Check.ID+" · "+event.Check.Description)
+		m.addSuiteLog(event.SuiteIndex, "run", event.Check.ID+" · "+event.Check.Description)
 	case executor.CheckFinished:
 		if event.CheckIndex < 0 || event.CheckIndex >= suite.total {
 			return
@@ -248,13 +258,17 @@ func (m *model) applyEvent(event executor.RunEvent) {
 		}
 		suite.results[event.CheckIndex] = event.Result
 		level, text := resultMessage(event.Result)
-		m.addLog(level, text)
+		m.addSuiteLog(event.SuiteIndex, level, text)
 	case executor.SuiteFinished:
 		suite.done = true
 	}
 }
 
-func (m *model) addLog(level, text string) {
+func (m *model) addLog(level, text string) { m.appendLog(-1, level, text) }
+
+func (m *model) addSuiteLog(index int, level, text string) { m.appendLog(index, level, text) }
+
+func (m *model) appendLog(index int, level, text string) {
 	oldRows := 0
 	if m.logOffset > 0 {
 		oldRows = len(m.logRows(m.logWidth()))
@@ -267,10 +281,18 @@ func (m *model) addLog(level, text string) {
 	if len(lines) > 10 {
 		lines = append(lines[:10], "… output truncated in dashboard; see report")
 	}
-	m.logs = append(m.logs, logEntry{time.Now().Format("15:04:05"), level, strings.Join(lines, "\n")})
-	if len(m.logs) > maxLogEntries {
-		m.logs = m.logs[len(m.logs)-maxLogEntries:]
+	text = strings.Join(lines, "\n")
+	buffer := &m.logs
+	if index >= 0 && index < len(m.suites) {
+		buffer = &m.suites[index].logs
+	} else {
+		text = "[RUN] " + text
 	}
+	*buffer = append(*buffer, logEntry{time.Now().Format("15:04:05"), level, text})
+	if len(*buffer) > maxLogEntries {
+		*buffer = (*buffer)[len(*buffer)-maxLogEntries:]
+	}
+
 	if m.logOffset > 0 {
 		m.logOffset = max(0, m.logOffset+len(m.logRows(m.logWidth()))-oldRows)
 	}
