@@ -157,6 +157,36 @@ under the [Releases](https://github.com/mev0lent/hardener/releases) page.
 
 ---
 
+## Live terminal dashboard
+
+Add `--tui` to `audit` or `fix` for live category scores, progress,
+and scrolling check results with skip reasons and error details.
+
+```bash
+./hardener audit --ruleset ruleset.yaml --all --tui
+./hardener fix --ruleset ruleset.yaml --all --tui
+
+# Preview using simulated checks
+./hardener tui-demo
+
+# Browse saved audit/fix results without executing commands
+./hardener view reports/example.json
+
+# Open the report path prompt
+./hardener view
+```
+
+Use your binary's filename, such as `hardener-linux` or `hardener-macos`.
+
+Scores are red below 35%, orange at 35–64%, and green at 65% or above.
+Skipped and manual checks are excluded; successful fixes require another
+audit to count as verified passes.
+
+Press `o` after a run finishes to open a saved report. Saved reports
+reconstruct results, not the original timed activity stream.
+
+See [TUI.md](TUI.md) for keyboard controls, scoring, and terminal requirements.
+
 ## Command Reference
 
 | Command | Flag | Short | Description |

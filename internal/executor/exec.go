@@ -78,6 +78,15 @@ func HardenerCmdEnv() []string {
 func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, suites []config.TestSuite) (
 	[]config.SuiteResult, map[string]bool, map[string]bool, error) {
 
+	return RunSuitesObserved(ctx, mode, osName, archName, suites, nil, nil)
+}
+
+// RunSuitesObserved lets an optional UI observe results and request a stop
+// between checks. A running fix always gets to finish its PostDelta backup.
+func RunSuitesObserved(ctx *config.ExecContext, mode RunMode, osName, archName string,
+	suites []config.TestSuite, observer Observer, stop func() bool) (
+	[]config.SuiteResult, map[string]bool, map[string]bool, error) {
+
 	if len(suites) == 0 {
 		// All return statements must now include a nil error.
 		return nil, nil, nil, fmt.Errorf("error: No hardening guides (.md files with checks) found at the defined position: %s", ctx.BaseDir)
@@ -87,16 +96,23 @@ func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, s
 	fixesApplied := make(map[string]bool)
 	var suiteResults []config.SuiteResult
 
-	for _, suite := range suites {
+	for suiteIndex, suite := range suites {
 		if !suiteMatchesLabels(suite, ctx.Labels) {
 			continue
 		}
+		if stopRequested(stop) {
+			break
+		}
+		notify(observer, RunEvent{Kind: SuiteStarted, SuiteIndex: suiteIndex, Suite: suite})
 		msg := fmt.Sprintf("=== Running suite: %s ===",
 			suite.Title)
 		ui.PrintHeader(msg)
 
-		suiteResult := runSuite(ctx, mode, suite, ctx.SecurityLevel)
+		suiteResult := runSuite(ctx, mode, suite, ctx.SecurityLevel, suiteIndex, observer, stop)
 		suiteResults = append(suiteResults, suiteResult)
+		if len(suiteResult.Checks) == len(suite.Checks) {
+			notify(observer, RunEvent{Kind: SuiteFinished, SuiteIndex: suiteIndex, Suite: suite})
+		}
 
 		for _, check := range suiteResult.Checks {
 			if check.Skipped || check.SkippedDistro || check.SkippedMissing {
@@ -112,13 +128,18 @@ func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, s
 	return suiteResults, checksPassed, fixesApplied, nil
 }
 
-func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string) config.SuiteResult {
+func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string, suiteIndex int, observer Observer, stop func() bool) config.SuiteResult {
 	var checkResults []config.CheckResult
 
 	fixedCount, skippedCount, distroSkippedCount, missingCount, passedCount, failedCount, errorCount := 0, 0, 0, 0, 0, 0, 0
-	for _, check := range suite.Checks {
+	for checkIndex, check := range suite.Checks {
+		if stopRequested(stop) {
+			break
+		}
+		notify(observer, RunEvent{Kind: CheckStarted, SuiteIndex: suiteIndex, CheckIndex: checkIndex, Check: check})
 		result := runCheck(ctx, mode, check, security_level)
 		checkResults = append(checkResults, result)
+		notify(observer, RunEvent{Kind: CheckFinished, SuiteIndex: suiteIndex, CheckIndex: checkIndex, Check: check, Result: result})
 
 		// Print status immediately
 

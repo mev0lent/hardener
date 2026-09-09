@@ -103,6 +103,10 @@ type TestSuite struct {
 
 // Individual check result
 type CheckResult struct {
+	// Structured status for reports and dashboards; never infer errors from output text.
+	SkipReason     string `json:"skip_reason,omitempty"`
+	Error          string `json:"error,omitempty"`
+	Manual         bool   `json:"manual,omitempty"`
 	ID             string `json:"id"`
 	Description    string `json:"description"`
 	Passed         bool   `json:"passed"`
@@ -121,6 +125,7 @@ type SuiteResult struct {
 
 // Full audit report
 type AuditReport struct {
+	Incomplete   bool          `json:"incomplete,omitempty"`
 	Timestamp    time.Time     `json:"timestamp"`
 	OS           string        `json:"os"`
 	Arch         string        `json:"arch"`

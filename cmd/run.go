@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"hardener/internal/config"
+	"hardener/internal/dashboard"
 	"hardener/internal/executor"
 	"hardener/internal/ui"
 	"hardener/rollback"
@@ -193,19 +194,33 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 		return nil
 	}
 
-	// ── Execution & reporting ──────────────────────────────────────────────
-	suiteResults, checksPassed, fixesApplied, _ := executor.RunSuites(
-		ctx, mode, sys.OS, sys.Arch, selectedSuites,
-	)
-
-	reportType := "audit"
-	if mode == executor.ModeFix {
-		reportType = "fix"
+	// Share the exact selection between the dashboard and the execution engine.
+	selectedSuites = executor.FilterSuites(selectedSuites, ctx.Labels)
+	if len(selectedSuites) == 0 {
+		ui.PrintInfo("No suites match the requested labels.")
+		return nil
 	}
-	executor.MakeReport(sys, suiteResults, reportType, currentPath)
-	executor.MakeScorings(checksPassed, fixesApplied)
+	work := func(observer executor.Observer, stop func() bool) error {
+		suiteResults, checksPassed, fixesApplied, runErr := executor.RunSuitesObserved(
+			ctx, mode, sys.OS, sys.Arch, selectedSuites, observer, stop,
+		)
+		reportType := "audit"
+		if mode == executor.ModeFix {
+			reportType = "fix"
+		}
+		executor.MakeReportWithStatus(sys, suiteResults, reportType, currentPath, stop != nil && stop())
+		executor.MakeScorings(checksPassed, fixesApplied)
+		return runErr
+	}
+	useTUI, _ := cmd.Flags().GetBool("tui")
+	if useTUI && dashboard.Available() {
+		return runDashboard(ctx, mode, selectedSuites, work)
+	}
+	if useTUI {
+		ui.PrintInfo("Interactive terminal unavailable; using plain output.")
+	}
+	return work(nil, nil)
 
-	return nil
 }
 
 // setupAndValidateRuleset loads suites from a ruleset.yaml and derives a

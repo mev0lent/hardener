@@ -9,7 +9,13 @@ import (
 )
 
 func MakeReport(sys config.SystemInfo, suiteResults []config.SuiteResult, reportType, path string) {
+	MakeReportWithStatus(sys, suiteResults, reportType, path, false)
+}
+
+// MakeReportWithStatus explicitly marks reports from a stopped run as incomplete.
+func MakeReportWithStatus(sys config.SystemInfo, suiteResults []config.SuiteResult, reportType, path string, incomplete bool) {
 	auditReport := config.AuditReport{
+		Incomplete:   incomplete,
 		Timestamp:    time.Now(),
 		OS:           sys.OS,
 		Arch:         sys.Arch,

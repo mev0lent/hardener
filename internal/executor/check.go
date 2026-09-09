@@ -14,7 +14,8 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 		return config.CheckResult{
 			ID:          check.ID,
 			Description: check.Description,
-			Output:      fmt.Sprintf("not the security level of %s", check.SecurityLevel),
+			Output:      fmt.Sprintf("requires security level %q; selected level is %q", check.SecurityLevel, security_level),
+			SkipReason:  fmt.Sprintf("requires security level %q; selected level is %q", check.SecurityLevel, security_level),
 			Skipped:     true,
 		}
 	}
@@ -34,6 +35,7 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 			ID:            check.ID,
 			Description:   check.Description,
 			Output:        fmt.Sprintf("not supported on distro %q", ctx.DistroName),
+			SkipReason:    fmt.Sprintf("not supported on distro %q", ctx.DistroName),
 			SkippedDistro: true,
 		}
 	}
@@ -48,6 +50,7 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 				ID:             check.ID,
 				Description:    check.Description,
 				Output:         fmt.Sprintf("required command %q not found", check.RequiresCommand),
+				SkipReason:     fmt.Sprintf("required command %q not found", check.RequiresCommand),
 				SkippedMissing: true,
 			}
 		}
@@ -62,6 +65,7 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 				ID:             check.ID,
 				Description:    check.Description,
 				Output:         fmt.Sprintf("required file %q not present", check.RequiresFile),
+				SkipReason:     fmt.Sprintf("required file %q not present", check.RequiresFile),
 				SkippedMissing: true,
 			}
 		}
@@ -90,6 +94,10 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 		Description: check.Description,
 		Passed:      passed,
 		Output:      output,
+		Manual:      strings.HasPrefix(strings.ToLower(strings.TrimSpace(check.Command)), "manual action required"),
+	}
+	if err != nil {
+		result.Error = err.Error()
 	}
 
 	if !passed && mode == ModeFix && strings.TrimSpace(check.Fix) != "" {
@@ -97,6 +105,7 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 		result.FixApplied = ok
 		if fixErr != nil {
 			result.Output = fmt.Sprintf("Fix failed: %v", fixErr)
+			result.Error = fixErr.Error()
 		} else {
 			result.Output = out
 		}
