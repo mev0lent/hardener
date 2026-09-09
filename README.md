@@ -200,6 +200,9 @@ See [TUI.md](TUI.md) for keyboard controls, scoring, and terminal requirements.
 | `rollback` | `--latest` | | Roll back to the most recent fix run |
 | `rollback` | `--timestamp <ts>` | `-t` | Roll back to a specific run timestamp |
 | `rollback` | `--files <f1,f2>` | | Roll back specific files only |
+| `audit` / `fix` | `--tui` | | Show the live terminal dashboard |
+| `tui-demo` | | | Preview the dashboard with simulated checks |
+| `view [report.json]` | | | Browse saved results; omit the path to open a prompt |
 
 `--ruleset` and `--path` are mutually exclusive; exactly one must be provided for `audit` and `fix`.
 
