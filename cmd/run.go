@@ -240,6 +240,17 @@ func setupAndValidateRuleset(ctx *config.ExecContext, rulesetPath string) ([]con
 	}
 
 	ui.PrintInfo(fmt.Sprintf("Loaded %d suite(s) from ruleset", len(suites)))
+
+	// LoadRuleset intentionally returns every suite regardless of its
+	// declared os/arch scope (see its doc comment); this is the filtering
+	// step it defers to the caller. Without it, every checksuite in a
+	// ruleset.yaml runs on every machine, e.g. Intel-only checks executing
+	// (and always failing) on Apple Silicon and vice versa.
+	suites = config.FilterSuitesByPlatform(suites, sys)
+	if len(suites) == 0 {
+		return nil, sys, fmt.Errorf("no suites in ruleset %q are applicable to this system (%s/%s)", rulesetPath, sys.OS, sys.Arch)
+	}
+
 	return suites, sys, nil
 }
 

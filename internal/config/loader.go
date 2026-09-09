@@ -60,36 +60,8 @@ func LoadChecks(dir string, sys SystemInfo) ([]TestSuite, error) {
 		}
 
 		// --- Platform Validation Logic ---
-
-		// 1. OS normalization and case-insensitive matching
-		// "linux" acts as a wildcard for specific distributions
-		docOS := strings.ToLower(fm.OS)
-		sysOS := strings.ToLower(sys.OS)
-
-		if docOS != "" && docOS != sysOS {
-			if docOS != "linux" {
-				ui.PrintInfo(fmt.Sprintf("Skipping %s: OS mismatch (%s vs %s)", f.Name(), docOS, sysOS))
-				continue
-			}
-		}
-
-		// 2. Architecture normalization
-		// Reconciles naming differences between Go (amd64) and standard benchmarks (x86_64)
-		sysArch := strings.ToLower(sys.Arch)
-		isArchSupported := len(fm.Arch) == 0 // Default to universal if empty
-
-		for _, a := range fm.Arch {
-			normalizedA := strings.ToLower(a)
-			if normalizedA == sysArch ||
-				(normalizedA == "x86_64" && sysArch == "amd64") ||
-				(normalizedA == "amd64" && sysArch == "x86_64") {
-				isArchSupported = true
-				break
-			}
-		}
-
-		if !isArchSupported {
-			ui.PrintInfo(fmt.Sprintf("Skipping %s: Architecture unsupported (%v)", f.Name(), fm.Arch))
+		if ok, reason := IsSuiteApplicable(fm.OS, fm.Arch, sys); !ok {
+			ui.PrintInfo(fmt.Sprintf("Skipping %s: %s", f.Name(), reason))
 			continue
 		}
 
