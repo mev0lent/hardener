@@ -9,20 +9,15 @@ import (
 	"time"
 )
 
-func TestPostDeltaCreatesEntry(t *testing.T) {
+func TestRecordedFixCreatesEntry(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctx := &config.ExecContext{RunID: "test-run", BaseDir: tmpDir}
 
 	file := filepath.Join(tmpDir, "test.conf")
 	os.WriteFile(file, []byte("old config line"), 0644)
 
-	oldContent, perm, _ := PreBackup(file)
-	os.WriteFile(file, []byte("new config line"), 0644)
-
 	check := config.Check{ID: "C001", AffectedFile: file}
-	if err := PostDelta(ctx, file, oldContent, perm, check); err != nil {
-		t.Fatalf("PostDelta failed: %v", err)
-	}
+	recordFix(t, ctx, check, func() { os.WriteFile(file, []byte("new config line"), 0644) })
 
 	runsFile := filepath.Join(tmpDir, "runs.json")
 	for i := 0; i < 5; i++ {
@@ -66,11 +61,8 @@ func TestApplyRunRestoresFile(t *testing.T) {
 	orig := []byte("old config line")
 	os.WriteFile(file, orig, 0644)
 
-	oldContent, perm, _ := PreBackup(file)
-	os.WriteFile(file, []byte("new config line"), 0644)
-
 	check := config.Check{ID: "C001", AffectedFile: file}
-	PostDelta(ctx, file, oldContent, perm, check)
+	recordFix(t, ctx, check, func() { os.WriteFile(file, []byte("new config line"), 0644) })
 
 	if err := ApplyRun(ctx, nil); err != nil {
 		t.Fatalf("ApplyRun failed: %v", err)

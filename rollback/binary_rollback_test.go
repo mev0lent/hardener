@@ -29,24 +29,15 @@ func TestBinaryPlistRollback(t *testing.T) {
 				}
 			}
 			write(before)
-			old, perm, err := PreBackup(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			write(after)
-			if err := PostDelta(ctx, file, old, perm, config.Check{}); err != nil {
-				t.Fatal(err)
-			}
+			check := config.Check{AffectedFile: file}
+			recordFix(t, ctx, check, func() { write(after) })
 			want := before
 			var rollbackErr error
 			switch mode {
 			case "restore":
 				// A second change to the same file must unwind in reverse order.
 				intermediate := append(append([]byte{}, after...), 0xff)
-				write(intermediate)
-				if err := PostDelta(ctx, file, after, perm, config.Check{}); err != nil {
-					t.Fatal(err)
-				}
+				recordFix(t, ctx, check, func() { write(intermediate) })
 				rollbackErr = ApplyRun(ctx, nil)
 			case "drift":
 				want = append(append([]byte{}, after...), 0xfe)

@@ -43,7 +43,7 @@ func statusColor(level string) lipgloss.TerminalColor {
 		return green
 	case "fail", "error", "stop":
 		return red
-	case "fixed", "manual":
+	case "fixed", "unverified", "manual":
 		return amber
 	case "suite", "run", "report":
 		return blue
@@ -137,7 +137,7 @@ func (m model) View() string {
 	if m.viewing {
 		progress = panel(paint("RECORDED CHECKS", muted)+"\n"+bold(fmt.Sprint(c.complete), ink)+paint(" · planned total not recorded", muted), w2, 4, line)
 	}
-	findings := panel(paint("FINDINGS / FIX COMMANDS", muted)+"\n"+paint(fmt.Sprintf("%d fail · %d error", c.failed, c.errors), red)+paint(fmt.Sprintf(" · %d fixed", c.fixed), amber), w3, 4, line)
+	findings := panel(paint("FINDINGS / FIX COMMANDS", muted)+"\n"+paint(fmt.Sprintf("%d fail · %d error", c.failed, c.errors), red)+paint(fmt.Sprintf(" · %d fixed · %d not effective", c.fixed, c.unverified), amber), w3, 4, line)
 	metrics := lipgloss.JoinHorizontal(lipgloss.Top, score, " ", progress, " ", findings)
 
 	bodyHeight := m.height - 10
@@ -206,6 +206,9 @@ func (m model) categoryView(width, height int) string {
 		}
 		if c.fixed > 0 {
 			counts += fmt.Sprintf(" · %d fix", c.fixed)
+		}
+		if c.unverified > 0 {
+			counts += fmt.Sprintf(" · %d fix ineffective", c.unverified)
 		}
 		if c.skipped > 0 {
 			counts += fmt.Sprintf(" · %d skip", c.skipped)

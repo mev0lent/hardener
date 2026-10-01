@@ -53,7 +53,8 @@ func init() {
 							case ci == 3 && si == 1:
 								result.Passed = false
 								result.FixApplied = true
-								result.Output = "Simulated fix applied; re-audit to verify"
+								result.FixVerified = true
+								result.Output = "Simulated fix applied and verified by re-check"
 							}
 							observer(executor.RunEvent{Kind: executor.CheckFinished, SuiteIndex: si, CheckIndex: ci, Check: check, Result: result})
 						}

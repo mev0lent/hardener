@@ -36,8 +36,11 @@ func resultMessage(r config.CheckResult) (string, string) {
 		detail = "Reason: " + detail
 	case r.Manual:
 		level = "manual"
-	case r.FixApplied:
+	case r.FixVerified:
 		level = "fixed"
+	case r.FixApplied:
+		// Also covers reports from before fixes were re-checked.
+		level = "unverified"
 	case r.Error != "":
 		level = "error"
 	case r.Passed:

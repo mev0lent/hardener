@@ -24,7 +24,7 @@ func TestInitializeRunsHandlesNullAndReadErrors(t *testing.T) {
 	}
 }
 
-func TestPostDeltaPreservesCorruptedHistory(t *testing.T) {
+func TestBeginPreservesCorruptedHistory(t *testing.T) {
 	dir := t.TempDir()
 	ctx := &config.ExecContext{RunID: "test-run", BaseDir: dir}
 	path := filepath.Join(dir, "config")
@@ -36,7 +36,7 @@ func TestPostDeltaPreservesCorruptedHistory(t *testing.T) {
 	if err := os.WriteFile(history, []byte(corrupted), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := PostDelta(ctx, path, []byte("before"), 0600, config.Check{}); err == nil {
+	if _, err := Begin(ctx, config.Check{AffectedFile: path}); err == nil {
 		t.Fatal("expected refusal to replace corrupted history")
 	}
 	got, err := os.ReadFile(history)

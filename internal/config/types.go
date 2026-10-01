@@ -104,13 +104,16 @@ type TestSuite struct {
 // Individual check result
 type CheckResult struct {
 	// Structured status for reports and dashboards; never infer errors from output text.
-	SkipReason     string `json:"skip_reason,omitempty"`
-	Error          string `json:"error,omitempty"`
-	Manual         bool   `json:"manual,omitempty"`
-	ID             string `json:"id"`
-	Description    string `json:"description"`
-	Passed         bool   `json:"passed"`
+	SkipReason  string `json:"skip_reason,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Manual      bool   `json:"manual,omitempty"`
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Passed      bool   `json:"passed"`
+	// FixApplied means the fix command exited 0. FixVerified means the check
+	// was re-run afterwards and passed; only that counts as fixed.
 	FixApplied     bool   `json:"fix_applied"`
+	FixVerified    bool   `json:"fix_verified,omitempty"`
 	Output         string `json:"output"`
 	Skipped        bool   `json:"skipped"`
 	SkippedDistro  bool   `json:"skipped_distro"`
@@ -149,4 +152,28 @@ type DeltaEntry struct {
 	Checksum  string `json:"checksum"`
 	Delta     string `json:"delta"`
 	Perm      uint32 `json:"perm"`
+
+	// The fields below were added after v1.2; entries without them are
+	// complete records of a file that existed before the fix.
+
+	// ID links a write-ahead record to its completion.
+	ID      string `json:"id,omitempty"`
+	CheckID string `json:"check_id,omitempty"`
+	// Kind is "" for a file and EntryKindSysctl for a live kernel value.
+	Kind string `json:"kind,omitempty"`
+	// Pending marks a record written before the fix ran that was never
+	// completed, e.g. because the process ended while the fix was running.
+	Pending bool `json:"pending,omitempty"`
+	// Created means the file did not exist before the fix; Removed means
+	// the fix deleted a file that existed.
+	Created bool `json:"created,omitempty"`
+	Removed bool `json:"removed,omitempty"`
+	// PostChecksum is the SHA-256 of what the fix left behind. Rollback
+	// refuses to touch a file whose content no longer matches it.
+	PostChecksum string `json:"post_checksum,omitempty"`
+	// Before is the base64 pre-fix content: the whole file while a record is
+	// pending, or the previous value of a sysctl entry.
+	Before string `json:"before,omitempty"`
 }
+
+const EntryKindSysctl = "sysctl"

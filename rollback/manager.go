@@ -2,7 +2,7 @@ package rollback
 
 import (
 	"bytes"
-	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"hardener/internal/config"
 	"hardener/internal/ui"
@@ -23,37 +22,6 @@ const backupModeMask = fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeStic
 // Rulesets may use prose such as "System service runtime" for non-file checks.
 func isBackupPath(path string) bool {
 	return filepath.IsAbs(path)
-}
-
-func PreBackup(filePath string) ([]byte, fs.FileMode, error) {
-	perm := fs.FileMode(0644)
-	if !isBackupPath(filePath) {
-		return nil, perm, nil
-	}
-
-	info, err := os.Stat(filePath)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return nil, perm, nil
-	case errors.Is(err, os.ErrPermission):
-		perm = 0600
-	case err != nil:
-		return nil, 0, fmt.Errorf("stat backup file %s: %w", filePath, err)
-	default:
-		if !info.Mode().IsRegular() {
-			return nil, 0, fmt.Errorf("backup path %s is not a regular file", filePath)
-		}
-		perm = info.Mode() & backupModeMask
-	}
-
-	data, err := readFileContent(filePath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, perm, nil
-	}
-	if err != nil {
-		return nil, 0, err
-	}
-	return data, perm, nil
 }
 
 func readFileContent(filePath string) ([]byte, error) {
@@ -72,21 +40,6 @@ func readFileContent(filePath string) ([]byte, error) {
 	return data, nil
 }
 
-func createEntry(ctx *config.ExecContext, filePath, checksum, delta string, perm fs.FileMode) (config.DeltaEntry, string, error) {
-	if filePath == "" || checksum == "" {
-		return config.DeltaEntry{}, "", errors.New("filePath or checksum is empty")
-	}
-	ts := time.Now().UTC().Format(time.RFC3339)
-	return config.DeltaEntry{
-		RunID:     ctx.RunID,
-		Timestamp: ts,
-		FilePath:  filePath,
-		Checksum:  checksum,
-		Delta:     delta,
-		Perm:      uint32(perm & backupModeMask),
-	}, ts, nil
-}
-
 func initializeRuns(deltaFile string) (map[string][]config.DeltaEntry, error) {
 	runs := make(map[string][]config.DeltaEntry)
 	data, err := os.ReadFile(deltaFile)
@@ -102,41 +55,19 @@ func initializeRuns(deltaFile string) (map[string][]config.DeltaEntry, error) {
 	if err := json.Unmarshal(data, &runs); err != nil {
 		return make(map[string][]config.DeltaEntry), fmt.Errorf("parse %s: %w", deltaFile, err)
 	}
-	// JSON null must not leave a nil map for PostDelta to append to.
+	// JSON null must not leave a nil map for Begin to append to.
 	if runs == nil {
 		runs = make(map[string][]config.DeltaEntry)
 	}
 	return runs, nil
 }
 
-func PostDelta(ctx *config.ExecContext, filePath string, oldContent []byte, origPerm fs.FileMode, _ config.Check) error {
-	if !isBackupPath(filePath) {
-		return nil
-	}
-	newContent, err := readFileContent(filePath)
-	if err != nil {
-		return fmt.Errorf("read post-fix file %s: %w", filePath, err)
-	}
-
-	deltaFile := filepath.Join(ctx.BaseDir, "runs.json")
-	runs, err := initializeRuns(deltaFile)
-	if err != nil {
-		// Never overwrite existing history when reading or decoding it fails.
-		return err
-	}
-	delta, checksum := ComputeDelta(string(newContent), string(oldContent))
-	entry, _, err := createEntry(ctx, filePath, checksum, delta, origPerm)
-	if err != nil {
-		return err
-	}
-	runs[ctx.RunID] = append(runs[ctx.RunID], entry)
-
+func jsonIndent(runs map[string][]config.DeltaEntry) ([]byte, error) {
 	data, err := json.MarshalIndent(runs, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode rollback history: %w", err)
+		return nil, err
 	}
-	// Backups may contain sensitive configuration; restrict history access.
-	return writeFileAtomic(deltaFile, append(data, '\n'), 0600)
+	return append(data, '\n'), nil
 }
 
 func ApplyRun(ctx *config.ExecContext, files []string) error {
@@ -187,11 +118,17 @@ func filterRollbackFiles(entries []config.DeltaEntry, files []string) []config.D
 func applyDelta(_ *config.ExecContext, entries []config.DeltaEntry) error {
 	var errs []error
 	failedFiles := make(map[string]bool)
+	var fileEntries, kernelEntries []config.DeltaEntry
 
 	// Walk backwards without changing the caller's slice. Older deltas depend
 	// on newer ones having succeeded, so stop a file's chain after a failure.
 	for i := len(entries) - 1; i >= 0; i-- {
 		entry := entries[i]
+		if entry.Kind == config.EntryKindSysctl {
+			kernelEntries = append(kernelEntries, entry)
+			continue
+		}
+		fileEntries = append(fileEntries, entry)
 		if failedFiles[entry.FilePath] {
 			continue
 		}
@@ -201,51 +138,147 @@ func applyDelta(_ *config.ExecContext, entries []config.DeltaEntry) error {
 			ui.PrintErrorMessage(err.Error())
 		}
 	}
+	if len(errs) == 0 && len(fileEntries) > 0 {
+		if err := executePostRollbackHooks(fileEntries); err != nil {
+			errs = append(errs, fmt.Errorf("files restored, but live-state synchronization failed: %w", err))
+		}
+	}
+	// Live kernel values go last: the hooks above re-apply sysctl files, and
+	// the recorded value is what was active before the run, whatever the
+	// files say. Newest first, so the oldest recorded value is written last.
+	for _, entry := range kernelEntries {
+		if err := restoreKernelValue(entry); err != nil {
+			errs = append(errs, err)
+			ui.PrintErrorMessage(err.Error())
+		}
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("rollback finished with %d error(s): %w", len(errs), errors.Join(errs...))
-	}
-	if err := executePostRollbackHooks(entries); err != nil {
-		return fmt.Errorf("files restored, but live-state synchronization failed: %w", err)
 	}
 	ui.PrintSummary("Rollback completed successfully")
 	return nil
 }
 
 func restoreEntry(entry config.DeltaEntry) error {
-	content, err := readFileContent(entry.FilePath)
+	path := entry.FilePath
+	current, err := captureFile(path)
 	if err != nil {
-		return fmt.Errorf("read rollback file %s: %w", entry.FilePath, err)
+		return fmt.Errorf("read rollback file %s: %w", path, err)
 	}
-	target, err := ApplyRollbackDelta(string(content), entry.Delta)
+	if entry.Pending {
+		ui.PrintInfo(fmt.Sprintf("%s: rollback record was never completed (the run ended during its fix); "+
+			"restoring the recorded pre-fix state without verifying the post-fix state", path))
+	}
+
+	if entry.Created {
+		if !current.exists {
+			ui.PrintInfo(fmt.Sprintf("%s was created by the fix and is already absent", path))
+			return nil
+		}
+		if err := checkPostState(entry, current); err != nil {
+			return err
+		}
+		if err := removeRollbackTarget(path, current); err != nil {
+			return err
+		}
+		ui.PrintInfo(fmt.Sprintf("removed %s (created by the fix)", path))
+		return nil
+	}
+
+	if current.exists && sha256Hex(current.content) == entry.Checksum {
+		// Already in the pre-fix state: a repeated rollback, or a fix that
+		// only changed permissions. The original mode still needs restoring.
+		if err := RestorePermissions(path, fs.FileMode(entry.Perm)); err != nil {
+			return fmt.Errorf("restore permissions for %s: %w", path, err)
+		}
+		ui.PrintInfo(fmt.Sprintf("restored permissions for %s (content unchanged)", path))
+		return nil
+	}
+	if err := checkPostState(entry, current); err != nil {
+		return err
+	}
+
+	var target string
+	switch {
+	case entry.Pending:
+		before, err := base64.StdEncoding.DecodeString(entry.Before)
+		if err != nil {
+			return fmt.Errorf("invalid pending rollback record for %s: %w", path, err)
+		}
+		target = string(before)
+	case entry.Removed:
+		target, err = ApplyRollbackDelta("", entry.Delta)
+	default:
+		target, err = ApplyRollbackDelta(string(current.content), entry.Delta)
+	}
 	if err != nil {
-		return fmt.Errorf("apply rollback delta for %s: %w", entry.FilePath, err)
+		return fmt.Errorf("apply rollback delta for %s: %w", path, err)
 	}
 
 	// Check the restored bytes before any write, including sudo fallbacks.
 	targetBytes := []byte(target)
-	actualHash := fmt.Sprintf("%x", sha256.Sum256(targetBytes))
+	actualHash := sha256Hex(targetBytes)
 	if entry.Checksum != "" && actualHash != entry.Checksum {
 		return fmt.Errorf("rollback checksum mismatch for %s: got %s, expected %s; refusing to write",
-			entry.FilePath, actualHash, entry.Checksum)
+			path, actualHash, entry.Checksum)
 	}
-	if bytes.Equal(content, targetBytes) {
-		// Permission-only fixes still need their original mode restored.
-		if err := RestorePermissions(entry.FilePath, fs.FileMode(entry.Perm)); err != nil {
-			return fmt.Errorf("restore permissions for %s: %w", entry.FilePath, err)
-		}
-		ui.PrintInfo(fmt.Sprintf("restored permissions for %s (content unchanged)", entry.FilePath))
-		return nil
-	}
-	if err := writeRollbackTarget(entry, targetBytes); err != nil {
+	if err := writeRollbackTarget(entry, targetBytes, current); err != nil {
 		return err
 	}
-	ui.PrintInfo(fmt.Sprintf("restored %s successfully", entry.FilePath))
+	ui.PrintInfo(fmt.Sprintf("restored %s successfully", path))
+	return nil
+}
+
+// checkPostState refuses to touch a file that no longer holds what the fix
+// left behind, so rollback cannot discard a change made after the run.
+// Pending and pre-v1.3 records carry no post-fix checksum; for the latter the
+// checksum of the patched result still guards the write.
+func checkPostState(entry config.DeltaEntry, current fileState) error {
+	if entry.Pending {
+		return nil
+	}
+	if entry.Removed {
+		if current.exists {
+			return fmt.Errorf("%s was removed by the fix but exists again; refusing to overwrite", entry.FilePath)
+		}
+		return nil
+	}
+	if entry.PostChecksum == "" {
+		return nil
+	}
+	if !current.exists {
+		return fmt.Errorf("%s was removed after the fix; refusing to restore", entry.FilePath)
+	}
+	if got := sha256Hex(current.content); got != entry.PostChecksum {
+		return fmt.Errorf("%s changed after the fix (sha256 %s, fix left %s); refusing to overwrite",
+			entry.FilePath, got, entry.PostChecksum)
+	}
+	return nil
+}
+
+// verifyUnchanged is the last check before a rollback write: the file must
+// still be exactly what restoreEntry read and verified at the start.
+func verifyUnchanged(path string, expected fileState) error {
+	now, err := captureFile(path)
+	if err != nil {
+		return fmt.Errorf("re-read %s before writing: %w", path, err)
+	}
+	if now.exists != expected.exists || !bytes.Equal(now.content, expected.content) {
+		return fmt.Errorf("%s changed while rollback was running; refusing to overwrite", path)
+	}
 	return nil
 }
 
 // Write in the destination directory so rename stays on the same filesystem.
 // Unique temporary names avoid collisions and following a fixed .tmp symlink.
 func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
+	return writeFileAtomicGuarded(path, data, perm, nil)
+}
+
+// guard runs after the new content is fully written to the temporary file and
+// immediately before the rename, keeping the window for a lost concurrent
+// update as small as a rename allows.
+func writeFileAtomicGuarded(path string, data []byte, perm fs.FileMode, guard func() error) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".hardener-*")
 	if err != nil {
 		return fmt.Errorf("create temporary file for %s: %w", path, err)
@@ -267,19 +300,46 @@ func writeFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close temporary file for %s: %w", path, err)
 	}
+	if guard != nil {
+		if err := guard(); err != nil {
+			return err
+		}
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
 }
 
-func writeRollbackTarget(entry config.DeltaEntry, data []byte) error {
-	err := writeFileAtomic(entry.FilePath, data, fs.FileMode(entry.Perm))
+func writeRollbackTarget(entry config.DeltaEntry, data []byte, expected fileState) error {
+	guard := func() error { return verifyUnchanged(entry.FilePath, expected) }
+	err := writeFileAtomicGuarded(entry.FilePath, data, fs.FileMode(entry.Perm), guard)
 	if !errors.Is(err, os.ErrPermission) {
 		return err
 	}
 	ui.PrintInfo(fmt.Sprintf("Elevating write for %s", entry.FilePath))
+	if err := guard(); err != nil {
+		return err
+	}
 	return WriteFileMaybeSudo(entry.FilePath, data, fs.FileMode(entry.Perm))
+}
+
+func removeRollbackTarget(path string, expected fileState) error {
+	if err := verifyUnchanged(path, expected); err != nil {
+		return err
+	}
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrPermission) {
+		output, sudoErr := exec.Command("sudo", "rm", "-f", "--", path).CombinedOutput()
+		if sudoErr != nil {
+			return fmt.Errorf("sudo rm %s: %w (%s)", path, sudoErr, strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return nil
 }
 
 func executePostRollbackHooks(entries []config.DeltaEntry) error {
