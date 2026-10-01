@@ -109,7 +109,36 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 		} else {
 			result.Output = out
 		}
+		if ok {
+			verifyFix(check, &result)
+		}
 	}
 
 	return result
+}
+
+// verifyFix re-runs the check after a fix whose command exited 0. Exit code 0
+// alone says nothing about the resulting state: a fix can succeed and still
+// leave the check failing, e.g. until its post_action (a reboot, a service
+// restart) has happened.
+func verifyFix(check config.Check, result *config.CheckResult) {
+	passed, output, err := RunCheck(check)
+	result.FixVerified = err == nil && passed
+	if result.FixVerified {
+		ui.PrintFixed(fmt.Sprintf("Fix for check %s verified: the check now passes.", check.ID))
+		return
+	}
+	got := output
+	if err != nil {
+		got = strings.TrimSpace(fmt.Sprintf("%s (%v)", output, err))
+	}
+	msg := fmt.Sprintf("Fix for check %s ran, but the check still fails (expected %q, got %q).", check.ID, check.Expected, got)
+	if pa := strings.TrimSpace(check.PostAction); pa != "" && !strings.EqualFold(pa, "none") {
+		msg += " It may take effect after the post action: " + pa
+	}
+	ui.PrintErrorMessage(msg)
+	if strings.TrimSpace(result.Output) != "" {
+		msg += "\nFix output: " + result.Output
+	}
+	result.Output = msg
 }

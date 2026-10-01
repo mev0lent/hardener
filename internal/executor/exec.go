@@ -82,7 +82,7 @@ func RunSuites(ctx *config.ExecContext, mode RunMode, osName, archName string, s
 }
 
 // RunSuitesObserved lets an optional UI observe results and request a stop
-// between checks. A running fix always gets to finish its PostDelta backup.
+// between checks. A running fix always gets to complete its rollback record.
 func RunSuitesObserved(ctx *config.ExecContext, mode RunMode, osName, archName string,
 	suites []config.TestSuite, observer Observer, stop func() bool) (
 	[]config.SuiteResult, map[string]bool, map[string]bool, error) {
@@ -120,7 +120,8 @@ func RunSuitesObserved(ctx *config.ExecContext, mode RunMode, osName, archName s
 			}
 			checksPassed[check.ID] = check.Passed
 			if !check.Passed {
-				fixesApplied[check.ID] = check.FixApplied
+				// Only a fix the re-run check confirmed counts as applied.
+				fixesApplied[check.ID] = check.FixVerified
 			}
 		}
 	}
@@ -131,7 +132,7 @@ func RunSuitesObserved(ctx *config.ExecContext, mode RunMode, osName, archName s
 func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string, suiteIndex int, observer Observer, stop func() bool) config.SuiteResult {
 	var checkResults []config.CheckResult
 
-	fixedCount, skippedCount, distroSkippedCount, missingCount, passedCount, failedCount, errorCount := 0, 0, 0, 0, 0, 0, 0
+	fixedCount, notEffectiveCount, skippedCount, distroSkippedCount, missingCount, passedCount, failedCount, errorCount := 0, 0, 0, 0, 0, 0, 0, 0
 	for checkIndex, check := range suite.Checks {
 		if stopRequested(stop) {
 			break
@@ -151,8 +152,10 @@ func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, sec
 		} else if result.Skipped {
 			ui.PrintSkipped(check.ID)
 			skippedCount++
-		} else if result.FixApplied {
+		} else if result.FixVerified {
 			fixedCount++
+		} else if result.FixApplied {
+			notEffectiveCount++
 		} else {
 			manualActionPrefix := "manual action required"
 
@@ -183,8 +186,8 @@ func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, sec
 		summary = fmt.Sprintf("Summary for '%s': %d total, %d passed, %d failed, %d errors, %d skipped, %d distro-skipped, %d missing-command",
 			suite.Title, len(suite.Checks), passedCount, failedCount, errorCount, skippedCount, distroSkippedCount, missingCount)
 	} else if mode == ModeFix {
-		summary = fmt.Sprintf("Summary for '%s': %d total, %d fixed, %d passed, %d failed, %d errors, %d skipped, %d distro-skipped, %d missing-command",
-			suite.Title, len(suite.Checks), fixedCount, passedCount, failedCount, errorCount, skippedCount, distroSkippedCount, missingCount)
+		summary = fmt.Sprintf("Summary for '%s': %d total, %d fixed, %d fix not effective, %d passed, %d failed, %d errors, %d skipped, %d distro-skipped, %d missing-command",
+			suite.Title, len(suite.Checks), fixedCount, notEffectiveCount, passedCount, failedCount, errorCount, skippedCount, distroSkippedCount, missingCount)
 	}
 	ui.PrintSummary(summary)
 
@@ -325,7 +328,8 @@ func stderrSuffix(stderr string) string {
 	return fmt.Sprintf(" (stderr: %s)", strings.Join(lines, "; "))
 }
 
-// RunFix executes the fix for a check and safely handles errors.
+// RunFix executes the fix for a check and safely handles errors. applied only
+// means the fix command exited 0; runCheck re-runs the check to verify it.
 func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output string, err error) {
 	manualActionPrefix := "manual action required"
 
@@ -364,21 +368,27 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
-	// Backup file before applying fix
-	oldContent, origPerm, backupErr := rollback.PreBackup(check.AffectedFile)
+	// Record the pre-fix state before anything changes. Without a usable
+	// record, rollback could later empty the file or strip its permissions,
+	// so the fix does not run at all.
+	txn, backupErr := rollback.Begin(ctx, check)
 	if backupErr != nil {
-		ui.PrintErrorMessage(fmt.Sprintf("Could not backup file %s: %v", check.AffectedFile, backupErr))
+		ui.PrintErrorMessage(fmt.Sprintf("Fix for check %s not applied: %v", check.ID, backupErr))
+		return false, "", fmt.Errorf("rollback backup failed, fix not applied: %w", backupErr)
 	}
 
 	// Run the fix command
 	runErr := cmd.Run()
 	output = strings.TrimSpace(out.String())
 
-	// Backup already saved? Good, continue even if command had issues
-	if err := rollback.PostDelta(ctx, check.AffectedFile, oldContent, origPerm, check); err != nil {
-		return false, "", fmt.Errorf("failed to save delta: %w", err)
+	// Complete the record even when the fix failed: it may have changed
+	// something before exiting. On failure the pending record is kept and
+	// still restores the pre-fix state.
+	if err := txn.Commit(); err != nil {
+		ui.PrintErrorMessage(fmt.Sprintf("Rollback record for check %s left pending: %v", check.ID, err))
+	} else if txn.File() != "" {
+		ui.PrintInfo("Backed-up file: " + txn.File())
 	}
-	ui.PrintInfo("Backed-up file: " + check.AffectedFile)
 
 	ui.PrintInfo(fmt.Sprintf("Post Action required: %s", check.PostAction))
 
@@ -387,6 +397,5 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 		return false, output, nil
 	}
 
-	ui.PrintFixed(fmt.Sprintf("Fix command for check %s applied successfully.", check.ID))
 	return true, output, nil
 }

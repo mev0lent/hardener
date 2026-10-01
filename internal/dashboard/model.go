@@ -25,10 +25,10 @@ type suiteState struct {
 }
 
 type counts struct {
-	total, complete, passed, failed, errors, fixed, skipped, manual int
+	total, complete, passed, failed, errors, fixed, unverified, skipped, manual int
 }
 
-func (c counts) assessed() int { return c.passed + c.failed + c.errors + c.fixed }
+func (c counts) assessed() int { return c.passed + c.failed + c.errors + c.fixed + c.unverified }
 func (c counts) percent() int {
 	if c.assessed() == 0 {
 		return -1
@@ -44,8 +44,11 @@ func (s suiteState) counts() counts {
 			c.skipped++
 		case result.Manual:
 			c.manual++
-		case result.FixApplied:
+		case result.FixVerified:
 			c.fixed++
+		case result.FixApplied:
+			// The fix command ran, but the re-run check still failed.
+			c.unverified++
 		case result.Error != "":
 			c.errors++
 		case result.Passed:
@@ -67,6 +70,7 @@ func (m model) totals() counts {
 		total.failed += c.failed
 		total.errors += c.errors
 		total.fixed += c.fixed
+		total.unverified += c.unverified
 		total.skipped += c.skipped
 		total.manual += c.manual
 	}

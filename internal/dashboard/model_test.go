@@ -15,11 +15,15 @@ import (
 func TestVerifiedScoreExcludesSkippedAndManualButNotUnverifiedFixes(t *testing.T) {
 	suite := suiteState{total: 8, results: map[int]config.CheckResult{
 		0: {Passed: true}, 1: {Passed: true}, 2: {}, 3: {Error: "command failed"},
-		4: {FixApplied: true}, 5: {Skipped: true}, 6: {SkippedMissing: true}, 7: {Passed: true, Manual: true},
+		4: {FixApplied: true, FixVerified: true}, 5: {Skipped: true}, 6: {SkippedMissing: true}, 7: {Passed: true, Manual: true},
 	}}
 	c := suite.counts()
 	if c.percent() != 40 || c.assessed() != 5 || c.complete != 8 || c.fixed != 1 || c.manual != 1 || c.skipped != 2 {
 		t.Fatalf("incorrect score accounting: %+v, percent=%d", c, c.percent())
+	}
+	ineffective := suiteState{total: 1, results: map[int]config.CheckResult{0: {FixApplied: true}}}.counts()
+	if ineffective.fixed != 0 || ineffective.unverified != 1 || ineffective.assessed() != 1 {
+		t.Fatalf("a fix the re-check did not confirm must not count as fixed: %+v", ineffective)
 	}
 	if (counts{}).percent() != -1 {
 		t.Fatal("unassessed checks must not display 0% or 100%")
