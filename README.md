@@ -75,6 +75,18 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o hardener-linux .
 ./hardener-linux rollback --files /etc/sysctl.conf,/etc/hosts.deny
 ```
 
+A fix only counts as **fixed** when its check passes when re-run straight
+after the fix. A fix whose command succeeds while the check still fails is
+reported as *not effective*, often because its `post_action` (a reboot or a
+service restart) is still due.
+
+Before each fix, its `affected_file` and any live kernel values the check
+reads (`/proc/sys/...`, `sysctl -n/-w <key>`) are written to `runs.json`. If
+that backup fails, the fix is skipped. Rollback removes files a fix created,
+recreates files it deleted, and refuses to overwrite a file that changed
+after the fix. Not covered: package installs and removals, files named only
+in prose or by glob in `affected_file`, and `~/` paths.
+
 ---
 
 ### macOS
