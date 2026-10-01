@@ -61,36 +61,39 @@ run_step() {
     _STEP_RC=$rc
 }
 
-# Parse summary lines from hardener output.
-# With COLUMNS=300 set above, summaries won't wrap — each box fits on one line.
+# Parse summary boxes from hardener output.
+# The boxes are a fixed 60 columns wide regardless of COLUMNS, so a summary
+# wraps over several lines. Flatten the output and split it at each
+# "Summary for '" so every record holds one complete summary. The title ends
+# at "': <n> total" because titles may themselves contain an apostrophe.
 parse_summaries() {
     local output="$1"
     local summaries=""
+    local records
+    records=$(echo "$output" | sed 's/│//g; s/╭//g; s/╰//g; s/─//g' | tr '\n' ' ' | tr -s ' ' \
+        | sed "s/Summary for '/\\
+Summary for '/g" | grep "^Summary for '")
 
-    local cleaned_output
-    cleaned_output=$(echo "$output" | sed 's/│//g; s/╭//g; s/╰//g; s/─//g' | tr -s ' ')
-
-    while IFS= read -r line; do
-        local title
-        title=$(echo "$line" | sed -n "s/.*Summary for '\([^']*\)'.*/\1/p")
+    while IFS= read -r record; do
+        local title combined
+        title=$(echo "$record" | sed -n "s/^Summary for '\(.*\)': [0-9][0-9]* total.*/\1/p")
         [ -z "$title" ] && continue
+        combined=$(echo "$record" | sed 's/missing-command.*/missing-command/')
 
-        # Join this line with the next (handles any minor 2-line wrap that slips through)
-        local combined
-        combined=$(echo "$cleaned_output" | grep -A 1 "Summary for '$title'" | tr '\n' ' ' | tr -s ' ')
-
-        local total passed failed errors skipped fixed distro_skipped missing_cmd
+        local total passed failed errors skipped fixed not_effective distro_skipped missing_cmd
         total=$(echo "$combined"          | grep -oE '[0-9]+ total'          | head -1 | awk '{print $1}')
         passed=$(echo "$combined"         | grep -oE '[0-9]+ passed'         | head -1 | awk '{print $1}')
         failed=$(echo "$combined"         | grep -oE '[0-9]+ failed'         | head -1 | awk '{print $1}')
         errors=$(echo "$combined"         | grep -oE '[0-9]+ errors'         | head -1 | awk '{print $1}')
         skipped=$(echo "$combined"        | grep -oE '[0-9]+ skipped'        | head -1 | awk '{print $1}')
         fixed=$(echo "$combined"          | grep -oE '[0-9]+ fixed'          | head -1 | awk '{print $1}')
+        not_effective=$(echo "$combined"  | grep -oE '[0-9]+ fix not effective' | head -1 | awk '{print $1}')
         distro_skipped=$(echo "$combined" | grep -oE '[0-9]+ distro-skipped' | head -1 | awk '{print $1}')
         missing_cmd=$(echo "$combined"    | grep -oE '[0-9]+ missing-command'| head -1 | awk '{print $1}')
 
         total=${total:-0};          passed=${passed:-0};           failed=${failed:-0}
         errors=${errors:-0};        skipped=${skipped:-0};         fixed=${fixed:-0}
+        not_effective=${not_effective:-0}
         distro_skipped=${distro_skipped:-0}; missing_cmd=${missing_cmd:-0}
 
         local entry
@@ -101,6 +104,7 @@ parse_summaries() {
         "passed": $passed,
         "failed": $failed,
         "fixed": $fixed,
+        "fix_not_effective": $not_effective,
         "errors": $errors,
         "skipped": $skipped,
         "distro_skipped": $distro_skipped,
@@ -115,10 +119,10 @@ $entry"
         else
             summaries="$entry"
         fi
-    done < <(echo "$cleaned_output" | grep "Summary for '")
+    done <<< "$records"
 
     if [ -z "$summaries" ]; then
-        summaries='      { "suite": "NO_OUTPUT", "total": 0, "passed": 0, "failed": 0, "fixed": 0, "errors": 0, "skipped": 0, "distro_skipped": 0, "missing_command": 0 }'
+        summaries='      { "suite": "NO_OUTPUT", "total": 0, "passed": 0, "failed": 0, "fixed": 0, "fix_not_effective": 0, "errors": 0, "skipped": 0, "distro_skipped": 0, "missing_command": 0 }'
     fi
 
     echo "$summaries"
