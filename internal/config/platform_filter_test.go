@@ -23,7 +23,9 @@ func TestIsSuiteApplicable(t *testing.T) {
 		{"arch case-insensitive", "darwin", []string{"ARM64"}, SystemInfo{OS: "darwin", Arch: "arm64"}, true},
 		{"amd64 doc matches x86_64 system", "darwin", []string{"amd64"}, SystemInfo{OS: "darwin", Arch: "x86_64"}, true},
 		{"x86_64 doc matches amd64 system", "darwin", []string{"x86_64"}, SystemInfo{OS: "darwin", Arch: "amd64"}, true},
-		{"linux doc always applies (documented quirk)", "linux", nil, SystemInfo{OS: "darwin", Arch: "arm64"}, true},
+		// "linux" used to match every system, so Linux suites and their
+		// fixes ran on macOS.
+		{"linux doc does not apply on darwin", "linux", nil, SystemInfo{OS: "darwin", Arch: "arm64"}, false},
 		{"linux doc on actual linux system", "linux", nil, SystemInfo{OS: "linux", Arch: "amd64"}, true},
 		{
 			name: "real-world: Secure Boot (Intel T2) on Apple Silicon must be skipped",

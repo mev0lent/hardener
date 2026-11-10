@@ -106,11 +106,13 @@ func PrintFinalInfo(message string) {
 	fmt.Println(FinalInfo("[> SUMMARY] " + message))
 }
 
-func PrintSkipped(id string) {
-	if emit("skip", id+" | higher security level or unsupported distro") {
+// PrintSkipped reports a check that did not run and why: its security level,
+// its distro map, or its os/arch scope.
+func PrintSkipped(id, reason string) {
+	if emit("skip", id+" | "+reason) {
 		return
 	}
-	msg := fmt.Sprintf("[> SKIPPED]: %s | Test had a higher security level than asked for by user.\n", id)
+	msg := fmt.Sprintf("[> SKIPPED]: %s | %s\n", id, reason)
 	fmt.Println(Info(msg))
 }
 

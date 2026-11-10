@@ -156,7 +156,7 @@ func (m model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.addLog("done", "Run finished. Review the results; press q to return to your shell.")
 		}
 		if m.totals().fixed > 0 {
-			m.addLog("info", "Fix commands are not verification. Run an audit again to measure the new hardening level.")
+			m.addLog("info", "Fixed checks passed a re-check but count as passes only in the next audit. Run an audit again to measure the new hardening level.")
 		}
 	case tea.KeyMsg:
 		if m.opening {

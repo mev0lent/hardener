@@ -8,18 +8,20 @@ import (
 	"path/filepath"
 )
 
-func Save(report config.AuditReport, dir string) error {
+// Save writes the report as JSON into dir, or into ./reports when dir is
+// empty, and returns the path of the file it wrote.
+func Save(report config.AuditReport, dir string) (string, error) {
 	if dir == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return fmt.Errorf("could not determine current directory: %w", err)
+			return "", fmt.Errorf("could not determine current directory: %w", err)
 		}
 		dir = filepath.Join(cwd, "reports")
 	}
 
 	// Make sure directory exists
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+		return "", err
 	}
 
 	// Filename with timestamp
@@ -27,8 +29,8 @@ func Save(report config.AuditReport, dir string) error {
 
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return os.WriteFile(filename, data, 0644)
+	return filename, os.WriteFile(filename, data, 0644)
 }

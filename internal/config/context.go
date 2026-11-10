@@ -14,6 +14,8 @@ type ExecContext struct {
 	Labels       []string
 	Timestamp    string
 	Extra        map[string]interface{}
+	// DryRun lists the fix each failing check would get instead of running it.
+	DryRun bool
 }
 
 // Create a new context

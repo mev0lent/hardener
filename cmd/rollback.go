@@ -7,7 +7,7 @@ import (
 func init() {
 	rootCmd.AddCommand(rollbackCmd)
 	rollbackCmd.Flags().BoolP("latest", "l", false, "Rollback to the latest run (default if no timestamp is provided)")
-	rollbackCmd.Flags().StringP("timestamp", "t", "", "Rollback to a specific run timestamp (format: YYYYMMDDHHMMSS)")
+	rollbackCmd.Flags().StringP("timestamp", "t", "", "Rollback to a specific run, by its timestamp in runs.json (UTC RFC 3339, e.g. 2026-05-18T14:32:00Z)")
 	rollbackCmd.Flags().StringSlice("files", nil, "List of files to rollback")
 }
 

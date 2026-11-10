@@ -66,11 +66,14 @@ run_step() {
 # wraps over several lines. Flatten the output and split it at each
 # "Summary for '" so every record holds one complete summary. The title ends
 # at "': <n> total" because titles may themselves contain an apostrophe.
+# The box also wraps at hyphens, which flattening turns into "distro- skipped"
+# or "missing- command"; rejoin those, or the count is silently read as 0.
 parse_summaries() {
     local output="$1"
     local summaries=""
     local records
     records=$(echo "$output" | sed 's/│//g; s/╭//g; s/╰//g; s/─//g' | tr '\n' ' ' | tr -s ' ' \
+        | sed -E 's/([a-z])- ([a-z])/\1-\2/g' \
         | sed "s/Summary for '/\\
 Summary for '/g" | grep "^Summary for '")
 

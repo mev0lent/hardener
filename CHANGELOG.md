@@ -21,6 +21,49 @@
    - New `runs.json` fields are optional; records from older versions still
      roll back
 
+   Bug fixes:
+
+   - A counting grep that matches nothing is a failure, not an error, in every
+     spelling of the flag (`-ic`, `-Eci`, `-v -c`, `--count`, `egrep -c`), not
+     only the literal `grep -c`, also inside a quoted `sh -c '...'`. Every
+     command the old rule accepted is still accepted. Fixes
+     airdrop-discoverability-restricted and filevault-recovery-present-check
+     in the macOS 26 ruleset
+   - `security_level: optional` checks can run: `--security-level optional`
+     selects every check. `high` still excludes them. Levels are
+     case-insensitive, an unknown `--security-level` is rejected instead of
+     silently running baseline, and checks with an unknown level are listed
+   - `fix --dry-run` was ignored and applied every fix; it now audits and
+     lists the fixes it would apply. `--arch`, which never had an effect, is
+     deprecated
+   - Suite summaries count errors from the recorded error instead of searching
+     the output for "error", and count manual checks separately. Manual checks
+     no longer raise the check pass rate, and audits no longer print a 0% fix
+     rate
+   - A failed check shows the command and expected value of the distro
+     override that ran
+   - `--path` mode keeps `--profile`, `--label` and the distro name, and
+     matches the guide's `arch` like suites do (case-insensitive, `amd64` =
+     `x86_64`)
+   - Suites declaring `os: linux` no longer run, fixes included, on macOS;
+     per-check `os`/`arch` lists are applied. `aarch64` matches `arm64` like
+     `x86_64` matches `amd64`
+   - The report message names the file actually written (under the working
+     directory, not the binary's)
+   - A directory as `affected_file` no longer blocks the fix (`/var/log`,
+     `/var/log/journal`, `/etc/apparmor.d/` in the Linux ruleset); rollback
+     does not cover it
+   - Rollback handles `systemctl mask` links: the fix's record completes, and
+     rollback removes the link instead of failing and skipping the live-state
+     hooks for all other files. It never writes through such a link
+   - The rollback hook restarts `sshd.service` or `ssh.service`, whichever
+     exists, and only if running; it reloads systemd after restoring unit files
+   - A `---` line inside a block scalar (e.g. a heredoc in a `fix: |`) no
+     longer splits the YAML document; `---` elsewhere separates documents at
+     any indentation, as before
+   - Test harness: summaries wrapped at a hyphen (`distro- skipped`) are
+     parsed, and fixes that were not effective count as still failing in FX_F
+
    ## v1.1 : 2026-08-30
 
    Reference build for the term paper. Additions over v1.0:

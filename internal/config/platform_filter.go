@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"hardener/internal/ui"
@@ -13,52 +14,68 @@ import (
 //
 // This is shared by both loading paths — the markdown-based loader
 // (LoadChecks) and the ruleset-based loader (LoadRuleset) — so platform
-// matching semantics can't drift out of sync between them. Previously this
-// logic only existed inline in LoadChecks; LoadRuleset parsed the same
-// os/arch fields into TestSuite but nothing ever compared them against the
-// running system, so every checksuite in a ruleset.yaml ran on every
-// machine regardless of what it declared.
+// matching semantics can't drift out of sync between them.
 //
-// OS matching is case-insensitive; an empty OS means "any". As a special
-// case, inherited unchanged from the original LoadChecks behavior, a
-// document declaring os: linux is never skipped on OS grounds, regardless
-// of the running system's actual OS — this looks like it may have been
-// intended as "match any Linux distribution" but as written it matches
-// unconditionally, including on non-Linux systems. Preserved as-is here
-// rather than silently changed; worth a follow-up decision on whether it
-// should instead require sysOS == "linux".
+// OS matching is case-insensitive; an empty OS means "any". The original
+// LoadChecks let "linux" match any system, as a wildcard for distro names
+// back when the system OS could be one. The system OS is runtime.GOOS now,
+// so that exception only made Linux suites, and their fixes, run on macOS.
 //
 // Arch matching is case-insensitive against a list; an empty Arch list
-// means "any architecture". "amd64" and "x86_64" are treated as
-// equivalent, since Go's runtime.GOARCH and common benchmark documents
-// disagree on this name.
+// means "any architecture". "amd64"/"x86_64" and "arm64"/"aarch64" are
+// treated as equivalent, since Go's runtime.GOARCH and uname disagree on
+// these names.
 func IsSuiteApplicable(docOS string, docArch []string, sys SystemInfo) (ok bool, reason string) {
 	docOSNorm := strings.ToLower(docOS)
 	sysOS := strings.ToLower(sys.OS)
 
 	if docOSNorm != "" && docOSNorm != sysOS {
-		if docOSNorm != "linux" {
-			return false, fmt.Sprintf("OS mismatch (%s vs %s)", docOSNorm, sysOS)
-		}
+		return false, fmt.Sprintf("OS mismatch (%s vs %s)", docOSNorm, sysOS)
 	}
 
-	sysArch := strings.ToLower(sys.Arch)
-	archOK := len(docArch) == 0 // empty means universal
-
-	for _, a := range docArch {
-		normalizedA := strings.ToLower(a)
-		if normalizedA == sysArch ||
-			(normalizedA == "x86_64" && sysArch == "amd64") ||
-			(normalizedA == "amd64" && sysArch == "x86_64") {
-			archOK = true
-			break
-		}
-	}
-
-	if !archOK {
+	if !ArchMatches(docArch, sys.Arch) {
 		return false, fmt.Sprintf("Architecture unsupported (%v)", docArch)
 	}
 
+	return true, ""
+}
+
+// ArchMatches reports whether sysArch is in docArch, ignoring case and
+// treating the uname and Go names of an architecture as the same (x86_64 is
+// amd64, aarch64 is arm64). An empty list matches any arch.
+func ArchMatches(docArch []string, sysArch string) bool {
+	if len(docArch) == 0 {
+		return true
+	}
+	sysArch = canonicalArch(sysArch)
+	for _, a := range docArch {
+		if canonicalArch(a) == sysArch {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalArch(arch string) string {
+	switch arch = strings.ToLower(strings.TrimSpace(arch)); arch {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	}
+	return arch
+}
+
+// IsCheckApplicable applies a check's own os/arch lists, which narrow the
+// scope of its suite. An empty list means any.
+func IsCheckApplicable(check Check, sys SystemInfo) (ok bool, reason string) {
+	matchesOS := func(os string) bool { return strings.EqualFold(os, sys.OS) }
+	if len(check.OS) > 0 && !slices.ContainsFunc(check.OS, matchesOS) {
+		return false, fmt.Sprintf("check applies to OS %v, not %s", check.OS, sys.OS)
+	}
+	if !ArchMatches(check.Arch, sys.Arch) {
+		return false, fmt.Sprintf("check applies to arch %v, not %s", check.Arch, sys.Arch)
+	}
 	return true, ""
 }
 

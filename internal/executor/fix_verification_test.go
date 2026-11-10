@@ -47,11 +47,20 @@ func TestFixIsVerifiedByRerunningTheCheck(t *testing.T) {
 func TestFixDoesNotRunWhenBackupFails(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "fix-ran")
-	ctx := &config.ExecContext{BaseDir: dir, RunID: "test-run", SecurityLevel: "baseline"}
+	affected := filepath.Join(dir, "setting.conf")
+	if err := os.WriteFile(affected, []byte("0"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// runs.json cannot be written below a regular file.
+	history := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(history, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := &config.ExecContext{BaseDir: history, RunID: "test-run", SecurityLevel: "baseline"}
 	check := config.Check{
 		ID: "unbackupable", Command: "printf 0", Expected: "1",
 		Fix:          "touch '" + marker + "'",
-		AffectedFile: dir, // a directory cannot be backed up
+		AffectedFile: affected,
 	}
 	applied, _, err := RunFix(ctx, check)
 	if applied || err == nil {
