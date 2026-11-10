@@ -8,12 +8,12 @@ import (
 	"time"
 )
 
-func MakeReport(sys config.SystemInfo, suiteResults []config.SuiteResult, reportType, path string) {
-	MakeReportWithStatus(sys, suiteResults, reportType, path, false)
+func MakeReport(sys config.SystemInfo, suiteResults []config.SuiteResult, reportType string) {
+	MakeReportWithStatus(sys, suiteResults, reportType, false)
 }
 
 // MakeReportWithStatus explicitly marks reports from a stopped run as incomplete.
-func MakeReportWithStatus(sys config.SystemInfo, suiteResults []config.SuiteResult, reportType, path string, incomplete bool) {
+func MakeReportWithStatus(sys config.SystemInfo, suiteResults []config.SuiteResult, reportType string, incomplete bool) {
 	auditReport := config.AuditReport{
 		Incomplete:   incomplete,
 		Timestamp:    time.Now(),
@@ -23,11 +23,13 @@ func MakeReportWithStatus(sys config.SystemInfo, suiteResults []config.SuiteResu
 		SuiteResults: suiteResults,
 		ReportType:   reportType,
 	}
-	if err := report.Save(auditReport, ""); err != nil {
+	// Report the file Save wrote. The message used to name the binary's
+	// directory, while reports go to the working directory.
+	if path, err := report.Save(auditReport, ""); err != nil {
 		msg := fmt.Sprintf("Failed to save report: %s\n", err)
 		ui.PrintErrorMessage(msg)
 	} else {
-		msg := "\nSuccessfully saved audit report to " + path + "/reports\n"
+		msg := "\nSuccessfully saved " + reportType + " report to " + path + "\n"
 		ui.PrintReport(msg)
 	}
 }

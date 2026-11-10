@@ -1,9 +1,12 @@
 package config
 
 import (
+	"fmt"
 	"hardener/internal/ui"
 	"os"
 	"os/exec"
+	"slices"
+	"strings"
 )
 
 type preconditions struct {
@@ -33,13 +36,48 @@ func CheckPreconditions(tools []string) bool {
 	return conditionsMet
 }
 
+// SecurityLevels lists the security levels from least to most demanding.
+// Hardening guides mark some controls "optional": recommended, but they may
+// cost functionality the system needs. Those run only when requested
+// explicitly with --security-level optional, which selects every check.
+var SecurityLevels = []string{"baseline", "medium", "high", "optional"}
+
+// NormalizeSecurityLevel lowercases and trims a level so that "High" in a
+// ruleset or on the command line means the same as "high".
+func NormalizeSecurityLevel(level string) string {
+	return strings.ToLower(strings.TrimSpace(level))
+}
+
+func securityRank(level string) int {
+	return slices.Index(SecurityLevels, NormalizeSecurityLevel(level))
+}
+
+// IsSecurityLevel reports whether level is one of SecurityLevels.
+func IsSecurityLevel(level string) bool {
+	return securityRank(level) >= 0
+}
+
+// DetermineSecurityFit reports whether a check at checkLevel runs when
+// requestedLevel is selected. An unknown requested level behaves as baseline;
+// a check with an unknown or missing level never runs (see
+// UnknownSecurityLevels).
 func DetermineSecurityFit(requestedLevel, checkLevel string) bool {
-	switch requestedLevel {
-	case "high":
-		return checkLevel == "high" || checkLevel == "medium" || checkLevel == "baseline"
-	case "medium":
-		return checkLevel == "medium" || checkLevel == "baseline"
-	default: // "baseline" and any unknown level
-		return checkLevel == "baseline"
+	requested := max(securityRank(requestedLevel), 0)
+	check := securityRank(checkLevel)
+	return check >= 0 && check <= requested
+}
+
+// UnknownSecurityLevels describes every check whose security_level is not one
+// of SecurityLevels. Such a check is skipped at every level, so a typo would
+// otherwise hide it for good.
+func UnknownSecurityLevels(suites []TestSuite) []string {
+	var unknown []string
+	for _, suite := range suites {
+		for _, check := range suite.Checks {
+			if !IsSecurityLevel(check.SecurityLevel) {
+				unknown = append(unknown, fmt.Sprintf("%s (%q)", check.ID, check.SecurityLevel))
+			}
+		}
 	}
+	return unknown
 }

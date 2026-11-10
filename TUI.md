@@ -45,10 +45,11 @@ requires an interactive terminal.
 enter the denominator. Skipped and manual checks are excluded. A category with
 no assessed checks shows `—`, not a misleading zero or 100%.
 
-A successful fix command is counted separately and remains in the assessed
-set, but does not count as a verified pass. The executor has not rerun that
-check, and some changes require a service reload or reboot. Run a new audit to
-measure the resulting pass rate. This percentage describes the selected
+A fix is counted as fixed only when the check passes when re-run straight
+after it; a fix whose re-check still fails is shown as not effective. Both
+remain in the assessed set and neither counts as a pass: some changes only hold
+after a service reload or reboot, and the score describes the state the audit
+found. Run a new audit to measure the resulting pass rate. This percentage describes the selected
 ruleset checks; it is not a universal security rating.
 
 The dashboard indexes suites and checks by position so duplicate titles or IDs

@@ -22,7 +22,9 @@ func init() {
 	auditCmd.Flags().StringVarP(&archFlag, "arch", "a", "", "Filter by architecture (defaults to current arch)")
 	auditCmd.Flags().StringVarP(&pathFlag, "path", "p", "", "Path to the directory containing the hardening guide (markdown mode)")
 	auditCmd.Flags().StringVarP(&rulesetFlag, "ruleset", "r", "", "Path to a standalone ruleset.yaml file (alternative to --path)")
-	auditCmd.Flags().StringVarP(&securityLevel, "security-level", "s", "baseline", "Filter by security level")
+	auditCmd.Flags().StringVarP(&securityLevel, "security-level", "s", "baseline", "Highest security level to run: baseline, medium, high, or optional (runs every check)")
+	// --arch was never read; keep accepting it so existing scripts still run.
+	_ = auditCmd.Flags().MarkDeprecated("arch", "it never had an effect; suites are matched against the running architecture")
 	auditCmd.Flags().BoolVarP(&allSuites, "all", "A", false, "Run all applicable suites without interactive selection")
 }
 

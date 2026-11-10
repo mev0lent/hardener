@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hardener/internal/ui"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -124,14 +125,27 @@ func LoadRuleset(path string) ([]TestSuite, error) {
 
 // splitYAMLDocuments splits a multi-document YAML byte slice on "---" lines.
 // It preserves each document as a raw string for individual unmarshalling.
+//
+// A "---" line separates documents at any indentation, as it always has here,
+// so rulesets with indented separators keep loading. The exception is the
+// content of a block scalar (command: |, fix: >-, ...): a fix that writes a
+// YAML file from a heredoc can contain a "---" line of its own.
 func splitYAMLDocuments(data []byte) []string {
 	var docs []string
 	var current strings.Builder
+	blockIndent := -1 // column of the key whose block scalar is open, or -1
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.TrimSpace(line) == "---" {
+		trimmed := strings.TrimSpace(line)
+		if blockIndent >= 0 && (trimmed == "" || leadingSpace(line) > blockIndent) {
+			current.WriteString(line)
+			current.WriteByte('\n')
+			continue
+		}
+		blockIndent = -1
+		if isDocumentMarker(trimmed) {
 			if s := strings.TrimSpace(current.String()); s != "" {
 				docs = append(docs, s)
 			}
@@ -140,10 +154,48 @@ func splitYAMLDocuments(data []byte) []string {
 		}
 		current.WriteString(line)
 		current.WriteByte('\n')
+		if blockScalarStart.MatchString(line) {
+			blockIndent = keyColumn(line)
+		}
 	}
 	// flush the last document
 	if s := strings.TrimSpace(current.String()); s != "" {
 		docs = append(docs, s)
 	}
 	return docs
+}
+
+// blockScalarStart matches a line whose value is a block scalar indicator,
+// such as "  command: |", "fix: >-" or "- |2".
+var blockScalarStart = regexp.MustCompile(`(?:^|[:-])\s+[|>][-+0-9]*\s*(?:#.*)?$`)
+
+// isDocumentMarker matches a trimmed "---" line, optionally with a comment.
+func isDocumentMarker(trimmed string) bool {
+	rest, ok := strings.CutPrefix(trimmed, "---")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimSpace(rest)
+	return rest == "" || strings.HasPrefix(rest, "#")
+}
+
+func leadingSpace(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+// keyColumn is the column of the first key on a line, after any "- " of a
+// sequence entry. Block scalar content is indented further than that.
+func keyColumn(line string) int {
+	i := 0
+	for i < len(line) {
+		switch {
+		case line[i] == ' ' || line[i] == '\t':
+			i++
+		case line[i] == '-' && i+1 < len(line) && (line[i+1] == ' ' || line[i+1] == '\t'):
+			i += 2
+		default:
+			return i
+		}
+	}
+	return i
 }

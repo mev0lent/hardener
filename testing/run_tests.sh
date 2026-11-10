@@ -7,7 +7,7 @@
 #   ./run_tests.sh --ruleset FILE --binary PATH [options]
 #
 # Options:
-#   --level   baseline|medium|high  (default: baseline)
+#   --level   baseline|medium|high|optional  (default: baseline)
 #   --distros "d1 d2 ..."           (default: ubuntu debian rocky opensuse archlinux)
 #   --profile server|client|...     passed as --profile to hardener
 #   --label   kernel,network,...    passed as --label to hardener
@@ -43,7 +43,7 @@ while [[ $# -gt 0 ]]; do
         --profile)  PROFILE="$2";       shift 2 ;;
         --label)    LABELS="$2";        shift 2 ;;
         --help|-h)
-            echo "Usage: $0 (--guide PATH | --ruleset FILE) --binary PATH [--level baseline|medium|high] [--distros \"d1 d2\"] [--profile PROFILE] [--label label1,label2]"
+            echo "Usage: $0 (--guide PATH | --ruleset FILE) --binary PATH [--level baseline|medium|high|optional] [--distros \"d1 d2\"] [--profile PROFILE] [--label label1,label2]"
             exit 0 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -214,9 +214,12 @@ SUMMARY_FILE="$RESULTS_DIR/$TIMESTAMP/summary.txt"
         a1_mc=$(sum_field "$JSON" "01_audit_initial" "02_fix" "missing_command")
         a1_t=$(sum_field  "$JSON" "01_audit_initial" "02_fix" "total")
 
-        # Fix
+        # Fix: a fix that ran but whose re-check still fails is "not
+        # effective"; it is still failing after the fix, so it counts in FX_F.
         fx_ok=$(sum_field "$JSON" "02_fix" "03_audit_postfix" "fixed")
         fx_f=$(sum_field  "$JSON" "02_fix" "03_audit_postfix" "failed")
+        fx_ne=$(sum_field "$JSON" "02_fix" "03_audit_postfix" "fix_not_effective")
+        fx_f=$((fx_f + fx_ne))
         fx_t=$((fx_ok + fx_f))
 
         # Post-rollback audit
@@ -235,7 +238,7 @@ SUMMARY_FILE="$RESULTS_DIR/$TIMESTAMP/summary.txt"
 echo ""
 echo "Columns"
 echo "  A1/A3  P=passed  F=failed  E=errors  S=skipped  DS=distro-skipped  MC=missing-command  T=total"
-echo "  FX     OK=fixes applied  F=still failed  T=fix-attempted (OK+F)"
+echo "  FX     OK=fixes verified by re-check  F=still failing (incl. fix not effective)  T=OK+F"
 echo ""
 echo "Healthy run"
 echo "  A1: F+E low; S, DS, MC are neutral (not failures — expected on partial installs)"

@@ -115,11 +115,13 @@ func RunSuitesObserved(ctx *config.ExecContext, mode RunMode, osName, archName s
 		}
 
 		for _, check := range suiteResult.Checks {
-			if check.Skipped || check.SkippedDistro || check.SkippedMissing {
+			// Manual checks pass without verifying anything, so they stay out
+			// of the pass rate, as they do on the dashboard.
+			if check.Skipped || check.SkippedDistro || check.SkippedMissing || check.Manual {
 				continue
 			}
 			checksPassed[check.ID] = check.Passed
-			if !check.Passed {
+			if !check.Passed && mode == ModeFix {
 				// Only a fix the re-run check confirmed counts as applied.
 				fixesApplied[check.ID] = check.FixVerified
 			}
@@ -132,62 +134,62 @@ func RunSuitesObserved(ctx *config.ExecContext, mode RunMode, osName, archName s
 func runSuite(ctx *config.ExecContext, mode RunMode, suite config.TestSuite, security_level string, suiteIndex int, observer Observer, stop func() bool) config.SuiteResult {
 	var checkResults []config.CheckResult
 
-	fixedCount, notEffectiveCount, skippedCount, distroSkippedCount, missingCount, passedCount, failedCount, errorCount := 0, 0, 0, 0, 0, 0, 0, 0
+	fixedCount, notEffectiveCount, skippedCount, distroSkippedCount, missingCount, passedCount, failedCount, errorCount, manualCount := 0, 0, 0, 0, 0, 0, 0, 0, 0
 	for checkIndex, check := range suite.Checks {
 		if stopRequested(stop) {
 			break
 		}
 		notify(observer, RunEvent{Kind: CheckStarted, SuiteIndex: suiteIndex, CheckIndex: checkIndex, Check: check})
-		result := runCheck(ctx, mode, check, security_level)
+		result, ran := runCheck(ctx, mode, check, security_level)
 		checkResults = append(checkResults, result)
 		notify(observer, RunEvent{Kind: CheckFinished, SuiteIndex: suiteIndex, CheckIndex: checkIndex, Check: check, Result: result})
 
-		// Print status immediately
-
-		if result.SkippedMissing {
+		// Print status immediately. The order matches the dashboard's
+		// classification, and errors come from the structured Error field:
+		// searching the output for "error" counted real errors whose message
+		// lacks the word as failures, and passing checks whose output
+		// contains it as errors.
+		switch {
+		case result.SkippedMissing:
 			missingCount++
-		} else if result.SkippedDistro {
-			ui.PrintSkipped(fmt.Sprintf("%s (distro)", check.ID))
+		case result.SkippedDistro:
+			ui.PrintSkipped(check.ID, result.SkipReason)
 			distroSkippedCount++
-		} else if result.Skipped {
-			ui.PrintSkipped(check.ID)
+		case result.Skipped:
+			ui.PrintSkipped(check.ID, result.SkipReason)
 			skippedCount++
-		} else if result.FixVerified {
+		case result.Manual:
+			// A documented audit point: show the instruction as INFO.
+			ui.PrintInfo(fmt.Sprintf("Check %s: MANUAL ACTION REQUIRED: %s", check.ID, result.Output))
+			manualCount++
+		case result.FixVerified:
 			fixedCount++
-		} else if result.FixApplied {
+		case result.FixApplied:
 			notEffectiveCount++
-		} else {
-			manualActionPrefix := "manual action required"
-
-			// 1. Check if the check PASSED AND its command starts with the Manual Action prefix
-			if result.Passed && strings.HasPrefix(strings.ToLower(check.Command), manualActionPrefix) {
-				// This is a documented audit point, print the command/output as INFO
-				ui.PrintInfo(fmt.Sprintf("Check %s: MANUAL ACTION REQUIRED: %s", check.ID, result.Output))
-				passedCount++
-			} else if strings.Contains(result.Output, "error") {
-				// Original error handling for non-manual checks
-				msg := fmt.Sprintf(" Check %s: %s | error: %s", check.ID, check.Description, result.Output)
-				ui.PrintErrorMessage(msg)
-				errorCount++
-			} else if result.Passed {
-				// Generic Passed state for real checks that executed commands
-				ui.PrintPassed(check.ID)
-				passedCount++
-			} else {
-				// Failed state
-				ui.PrintFailed(check.ID, check.Expected, result.Output, check.Command)
-				failedCount++
+		case result.Error != "":
+			ui.PrintErrorMessage(fmt.Sprintf(" Check %s: %s | error: %s", check.ID, check.Description, result.Output))
+			errorCount++
+		case result.Passed:
+			ui.PrintPassed(check.ID)
+			passedCount++
+		default:
+			// Show the command and expected value the distro overrides selected.
+			expected := ran.Expected
+			if ran.ExpectedOp != "" {
+				expected = ran.ExpectedOp + " " + expected
 			}
+			ui.PrintFailed(check.ID, expected, result.Output, ran.Command)
+			failedCount++
 		}
 
 	}
 	summary := fmt.Sprintf("")
 	if mode == ModeAudit {
-		summary = fmt.Sprintf("Summary for '%s': %d total, %d passed, %d failed, %d errors, %d skipped, %d distro-skipped, %d missing-command",
-			suite.Title, len(suite.Checks), passedCount, failedCount, errorCount, skippedCount, distroSkippedCount, missingCount)
+		summary = fmt.Sprintf("Summary for '%s': %d total, %d passed, %d failed, %d errors, %d manual, %d skipped, %d distro-skipped, %d missing-command",
+			suite.Title, len(suite.Checks), passedCount, failedCount, errorCount, manualCount, skippedCount, distroSkippedCount, missingCount)
 	} else if mode == ModeFix {
-		summary = fmt.Sprintf("Summary for '%s': %d total, %d fixed, %d fix not effective, %d passed, %d failed, %d errors, %d skipped, %d distro-skipped, %d missing-command",
-			suite.Title, len(suite.Checks), fixedCount, notEffectiveCount, passedCount, failedCount, errorCount, skippedCount, distroSkippedCount, missingCount)
+		summary = fmt.Sprintf("Summary for '%s': %d total, %d fixed, %d fix not effective, %d passed, %d failed, %d errors, %d manual, %d skipped, %d distro-skipped, %d missing-command",
+			suite.Title, len(suite.Checks), fixedCount, notEffectiveCount, passedCount, failedCount, errorCount, manualCount, skippedCount, distroSkippedCount, missingCount)
 	}
 	ui.PrintSummary(summary)
 
@@ -236,22 +238,12 @@ func compareExpected(output, expected, op string) bool {
 }
 
 func RunCheck(check config.Check) (bool, string, error) {
-	// --- Check for Manual Action Command (Case-Insensitive) ---
-	manualActionPrefix := "manual action required"
-
-	// Check if the command starts with the required phrase (case-insensitive comparison)
-	if strings.HasPrefix(strings.ToLower(check.Command), manualActionPrefix) {
-		// If it's a documentation command, we "pass" it and print the command itself.
-		// The check is deemed successful as it verified the documentation requirement.
-		// We set output to the command text for display purposes (optional, but informative).
-
-		// Note: The caller (runSuite) expects the CheckResult object to show the command,
-		// but here we return a direct pass with the command text as the output.
-
-		// The check ID and description are handled by runSuite when it sees result.Passed=true.
+	// A "Manual action required: ..." command documents an audit point that
+	// cannot be automated. It "passes" with its own text as output; callers
+	// mark the result as manual so it is not counted as a verified pass.
+	if isManualAction(check.Command) {
 		return true, check.Command, nil
 	}
-	// --- End Manual Action Check ---
 
 	/* taken out for now, up for discussion
 	if !config.FileExists(check.AffectedFile) {
@@ -295,9 +287,9 @@ func RunCheck(check config.Check) (bool, string, error) {
 		}
 	}
 
-	// Special handling for grep -c: exit 1 with 0 matches is not a true command error.
-	// Matches both standalone "grep -c ..." and piped "... | grep -c ..."
-	if strings.Contains(check.Command, "grep -c") && exitCode == 1 && output == "0" {
+	// A counting grep exits 1 when it matches nothing, but "0" is a valid count
+	// and the check then fails or passes on it like any other value.
+	if exitCode == 1 && output == "0" && countsGrepMatches(check.Command) {
 		passed := compareExpected(output, check.Expected, check.ExpectedOp)
 		return passed, output, nil
 	}
@@ -331,9 +323,7 @@ func stderrSuffix(stderr string) string {
 // RunFix executes the fix for a check and safely handles errors. applied only
 // means the fix command exited 0; runCheck re-runs the check to verify it.
 func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output string, err error) {
-	manualActionPrefix := "manual action required"
-
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(check.Fix)), manualActionPrefix) {
+	if isManualAction(check.Fix) {
 		ui.PrintInfo(fmt.Sprintf("Check %s: %s", check.ID, check.Fix))
 		return false, "Manual intervention required", nil
 	}
@@ -342,18 +332,11 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 		return false, "", fmt.Errorf("no fix defined for check %s", check.ID)
 	}
 
-	cmdStr := check.Fix
-	useSudo := check.Sudo
-
 	ui.PrintInfo(fmt.Sprintf("Fixing %s with: %s", check.ID, check.Fix))
 
-	if check.FixSudo != nil {
-		useSudo = *check.FixSudo
-	}
-
-	wrapped := wrapWithPath(cmdStr)
+	wrapped := wrapWithPath(check.Fix)
 	var cmd *exec.Cmd
-	if useSudo {
+	if fixUsesSudo(check) {
 		cmd = exec.Command("sudo", "sh", "-c", wrapped)
 	} else {
 		cmd = exec.Command("sh", "-c", wrapped)
@@ -398,4 +381,19 @@ func RunFix(ctx *config.ExecContext, check config.Check) (applied bool, output s
 	}
 
 	return true, output, nil
+}
+
+// fixUsesSudo reports whether a check's fix runs under sudo: fix_sudo when
+// the ruleset sets it, otherwise the check's own sudo setting.
+func fixUsesSudo(check config.Check) bool {
+	if check.FixSudo != nil {
+		return *check.FixSudo
+	}
+	return check.Sudo
+}
+
+// isManualAction reports whether a command or fix is a "Manual action
+// required: ..." instruction instead of something to execute.
+func isManualAction(command string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "manual action required")
 }

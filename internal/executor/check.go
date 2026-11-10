@@ -9,15 +9,33 @@ import (
 	"strings"
 )
 
-func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, security_level string) config.CheckResult {
+// runCheck runs one check and, in fix mode, its fix. It also returns the check
+// with the distro overrides that were applied, so callers report the command
+// and expected value that actually ran.
+func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, security_level string) (config.CheckResult, config.Check) {
 	if !config.DetermineSecurityFit(security_level, check.SecurityLevel) {
+		reason := fmt.Sprintf("requires security level %q; selected level is %q", check.SecurityLevel, security_level)
+		if !config.IsSecurityLevel(check.SecurityLevel) {
+			reason = fmt.Sprintf("unknown security level %q (known: %s)", check.SecurityLevel, strings.Join(config.SecurityLevels, ", "))
+		}
 		return config.CheckResult{
 			ID:          check.ID,
 			Description: check.Description,
-			Output:      fmt.Sprintf("requires security level %q; selected level is %q", check.SecurityLevel, security_level),
-			SkipReason:  fmt.Sprintf("requires security level %q; selected level is %q", check.SecurityLevel, security_level),
+			Output:      reason,
+			SkipReason:  reason,
 			Skipped:     true,
-		}
+		}, check
+	}
+
+	sys := config.SystemInfo{OS: ctx.OSName, Arch: ctx.ArchName}
+	if ok, reason := config.IsCheckApplicable(check, sys); !ok {
+		return config.CheckResult{
+			ID:            check.ID,
+			Description:   check.Description,
+			Output:        reason,
+			SkipReason:    reason,
+			SkippedDistro: true,
+		}, check
 	}
 
 	// Build the distro lookup chain: [DistroName, ...DistroFamily].
@@ -37,7 +55,7 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 			Output:        fmt.Sprintf("not supported on distro %q", ctx.DistroName),
 			SkipReason:    fmt.Sprintf("not supported on distro %q", ctx.DistroName),
 			SkippedDistro: true,
-		}
+		}, check
 	}
 	check = resolved
 
@@ -52,7 +70,7 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 				Output:         fmt.Sprintf("required command %q not found", check.RequiresCommand),
 				SkipReason:     fmt.Sprintf("required command %q not found", check.RequiresCommand),
 				SkippedMissing: true,
-			}
+			}, check
 		}
 	}
 
@@ -67,7 +85,7 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 				Output:         fmt.Sprintf("required file %q not present", check.RequiresFile),
 				SkipReason:     fmt.Sprintf("required file %q not present", check.RequiresFile),
 				SkippedMissing: true,
-			}
+			}, check
 		}
 	}
 
@@ -94,27 +112,46 @@ func runCheck(ctx *config.ExecContext, mode RunMode, check config.Check, securit
 		Description: check.Description,
 		Passed:      passed,
 		Output:      output,
-		Manual:      strings.HasPrefix(strings.ToLower(strings.TrimSpace(check.Command)), "manual action required"),
+		Manual:      isManualAction(check.Command),
 	}
 	if err != nil {
 		result.Error = err.Error()
 	}
 
-	if !passed && mode == ModeFix && strings.TrimSpace(check.Fix) != "" {
-		ok, out, fixErr := RunFix(ctx, check)
-		result.FixApplied = ok
-		if fixErr != nil {
-			result.Output = fmt.Sprintf("Fix failed: %v", fixErr)
-			result.Error = fixErr.Error()
-		} else {
-			result.Output = out
-		}
-		if ok {
-			verifyFix(check, &result)
+	if !passed && strings.TrimSpace(check.Fix) != "" {
+		switch {
+		case ctx.DryRun:
+			printPlannedFix(check)
+		case mode == ModeFix:
+			ok, out, fixErr := RunFix(ctx, check)
+			result.FixApplied = ok
+			if fixErr != nil {
+				result.Output = fmt.Sprintf("Fix failed: %v", fixErr)
+				result.Error = fixErr.Error()
+			} else {
+				result.Output = out
+			}
+			if ok {
+				verifyFix(check, &result)
+			}
 		}
 	}
 
-	return result
+	return result, check
+}
+
+// printPlannedFix reports what fix mode would do for a failing check, without
+// running the fix or writing a rollback record.
+func printPlannedFix(check config.Check) {
+	if isManualAction(check.Fix) {
+		ui.PrintInfo(fmt.Sprintf("Dry run: %s needs manual action: %s", check.ID, strings.TrimSpace(check.Fix)))
+		return
+	}
+	privilege := ""
+	if fixUsesSudo(check) {
+		privilege = " (with sudo)"
+	}
+	ui.PrintInfo(fmt.Sprintf("Dry run: %s would be fixed%s with: %s", check.ID, privilege, strings.TrimSpace(check.Fix)))
 }
 
 // verifyFix re-runs the check after a fix whose command exited 0. Exit code 0

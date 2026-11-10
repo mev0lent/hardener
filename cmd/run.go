@@ -95,6 +95,13 @@ func runHardwareInfo() {
 }
 
 func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, description string) error {
+	// --dry-run (fix only) used to be accepted and ignored, so every fix was
+	// applied. A dry run audits and lists the fix each failing check would get.
+	if dryRun {
+		mode = executor.ModeAudit
+		title += " (DRY RUN)"
+		description = "In this mode, your system will be audited and the fix for each failing check is listed. No fix is applied and nothing is changed."
+	}
 	ui.PrintWelcome(title, description)
 
 	// Detect which input mode the user requested.
@@ -116,8 +123,15 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 	ctx.RunID = time.Now().UTC().Format(time.RFC3339)
 	ctx.OSName = runtime.GOOS
 	ctx.ArchName = runtime.GOARCH
+	ctx.DryRun = dryRun
 
+	// An unknown level used to fall back to baseline silently, so a typo or
+	// "High" ran fewer checks than asked for.
 	level, _ := cmd.Flags().GetString("security-level")
+	level = config.NormalizeSecurityLevel(level)
+	if !config.IsSecurityLevel(level) {
+		return ui.ReturnError("Invalid flags", fmt.Errorf("--security-level %q is not one of: %s", level, strings.Join(config.SecurityLevels, ", ")))
+	}
 	ctx.SecurityLevel = level
 
 	profile, _ := cmd.Flags().GetString("profile")
@@ -145,15 +159,12 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 		}
 	} else {
 		// ── Markdown / guide-directory mode ───────────────────────────────────
-		ctx, sys, mdPath, err = setupAndValidate(cmd, title, description)
+		// This used to replace ctx with a fresh one, dropping --profile and
+		// --label in guide mode.
+		sys, err = setupAndValidate(mdPath)
 		if err != nil {
 			return ui.ReturnError("System validation failed", err)
 		}
-		// Re-stamp RunID / OS info that setupAndValidate doesn't set.
-		ctx.RunID = time.Now().UTC().Format(time.RFC3339)
-		ctx.OSName = runtime.GOOS
-		ctx.ArchName = runtime.GOARCH
-		ctx.SecurityLevel = level
 
 		ui.PrintInfo(fmt.Sprintf("Starting to collect Suites from %s", mdPath))
 		suites, err = config.LoadChecks(mdPath, sys)
@@ -165,6 +176,15 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 	if len(suites) == 0 {
 		ui.PrintInfo("No compatible hardening checks found for your system.")
 		return nil
+	}
+	// These checks never ran in earlier versions either; say so once.
+	if unknown := config.UnknownSecurityLevels(suites); len(unknown) > 0 {
+		listed := strings.Join(unknown[:min(len(unknown), 10)], ", ")
+		if len(unknown) > 10 {
+			listed += fmt.Sprintf(" and %d more", len(unknown)-10)
+		}
+		ui.PrintInfo(fmt.Sprintf("Warning: %d check(s) have a security_level that is not one of %s and are skipped at every level: %s",
+			len(unknown), strings.Join(config.SecurityLevels, ", "), listed))
 	}
 
 	// Distro detection happens after both loading paths so ctx is always set.
@@ -208,7 +228,7 @@ func executeRun(cmd *cobra.Command, mode executor.RunMode, title string, descrip
 		if mode == executor.ModeFix {
 			reportType = "fix"
 		}
-		executor.MakeReportWithStatus(sys, suiteResults, reportType, currentPath, stop != nil && stop())
+		executor.MakeReportWithStatus(sys, suiteResults, reportType, stop != nil && stop())
 		executor.MakeScorings(checksPassed, fixesApplied)
 		return runErr
 	}
@@ -254,27 +274,18 @@ func setupAndValidateRuleset(ctx *config.ExecContext, rulesetPath string) ([]con
 	return suites, sys, nil
 }
 
-func contains(slice []string, val string) bool {
-	for _, item := range slice {
-		if item == val {
-			return true
-		}
-	}
-	return false
-}
-
-func compareTarget(path string, sys config.SystemInfo) (bool, config.SystemInfo) {
+func compareTarget(path string, sys config.SystemInfo) bool {
 	readmePath := filepath.Join(path, "00_README.md")
 
 	if !config.FileExists(readmePath) {
 		ui.PrintErrorMessage(fmt.Sprintf("Required file '00_README.md' not found in path: %s", path))
-		return false, config.SystemInfo{}
+		return false
 	}
 
 	files, err := os.ReadDir(path)
 	if err != nil {
 		ui.PrintErrorMessage(err.Error())
-		return false, config.SystemInfo{}
+		return false
 	}
 	type Preconditions struct {
 		Tools []string `yaml:"tools"`
@@ -292,65 +303,57 @@ func compareTarget(path string, sys config.SystemInfo) (bool, config.SystemInfo)
 			data, err := os.ReadFile(fullFilePath)
 			if err != nil {
 				ui.PrintErrorMessage(fmt.Sprintf("could not read file %s: %v", fileName, err))
-				return false, config.SystemInfo{}
+				return false
 			}
 
 			var frontMatter ReportInfo
 			reader := bytes.NewReader(data)
 			if _, err := frontmatter.Parse(reader, &frontMatter); err != nil {
 				ui.PrintErrorMessage(fmt.Sprintf("could not parse YAML from %s: %v", fileName, err))
-				return false, config.SystemInfo{}
+				return false
 			}
 			docOS := strings.ToLower(frontMatter.OS)
 			sysOS := strings.ToLower(sys.OS)
 
 			if docOS != sysOS {
 				ui.PrintErrorMessage(fmt.Sprintf("OS mismatch for %s: Document requires '%s', System is '%s'", fileName, docOS, sysOS))
-				return false, config.SystemInfo{}
+				return false
 			}
 
-			systemArch := strings.ToLower(sys.Arch)
-			isArchSupported := contains(frontMatter.Arch, systemArch)
-
-			if !isArchSupported {
+			// Same arch matching as suites: case-insensitive, amd64 == x86_64.
+			// The guide must still name its architectures.
+			if len(frontMatter.Arch) == 0 || !config.ArchMatches(frontMatter.Arch, sys.Arch) {
 				ui.PrintErrorMessage(fmt.Sprintf("Architecture mismatch for %s: Document supports %v, System is %s", fileName, frontMatter.Arch, sys.Arch))
-				return false, config.SystemInfo{}
+				return false
 			}
 
 			if !config.CheckPreconditions(frontMatter.Preconditions.Tools) {
-				return false, config.SystemInfo{}
+				return false
 			}
 
 			ui.PrintPassed("Target matched: OS, Architecture, and Preconditions supported by 00_README.md")
-			return true, config.SystemInfo{OS: docOS, Arch: systemArch}
+			return true
 		}
 	}
-	return false, config.SystemInfo{}
+	return false
 }
 
-// setupAndValidate handles the initial system info, context creation, and validation
-// for the classic markdown / guide-directory mode.
-func setupAndValidate(cmd *cobra.Command, title string, description string) (*config.ExecContext, config.SystemInfo, string, error) {
+// setupAndValidate checks a guide directory's 00_README.md against the
+// running system for the classic markdown / guide-directory mode.
+func setupAndValidate(mdPath string) (config.SystemInfo, error) {
 	sys := config.SystemInfo{
 		OS:     runtime.GOOS,
 		Arch:   runtime.GOARCH,
 		Distro: config.DetectDistro(),
 	}
 
-	ex, _ := os.Executable()
-	currentPath := filepath.Dir(ex)
-	ctx := config.NewExecContext(uuid.New().String(), currentPath)
-
-	mdPath, _ := cmd.Flags().GetString("path")
-
-	reportApplicable, _ := compareTarget(mdPath, sys)
-
-	if !reportApplicable {
-		err := fmt.Errorf("hardening guide '%s' is not compatible with your system (OS: %s, Arch: %s) or not all prerequisites are met", mdPath, sys.OS, sys.Arch)
-		return nil, sys, "", err
+	// sys is returned as built here; compareTarget used to return a rebuilt
+	// copy that lost the distro in reports.
+	if !compareTarget(mdPath, sys) {
+		return sys, fmt.Errorf("hardening guide '%s' is not compatible with your system (OS: %s, Arch: %s) or not all prerequisites are met", mdPath, sys.OS, sys.Arch)
 	}
 
-	return ctx, sys, mdPath, nil
+	return sys, nil
 }
 
 // promptForSuites displays a multi-select prompt to the user to choose which suites to run.

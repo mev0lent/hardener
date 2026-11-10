@@ -18,7 +18,7 @@ func TestSkipReasonsAreRecorded(t *testing.T) {
 		{config.Check{SecurityLevel: "baseline", RequiresCommand: "hardener_nonexistent_test_command_91823"}, "required command"},
 		{config.Check{SecurityLevel: "baseline", RequiresFile: filepath.Join(t.TempDir(), "missing")}, "required file"},
 	} {
-		result := runCheck(ctx, ModeAudit, tc.check, "baseline")
+		result, _ := runCheck(ctx, ModeAudit, tc.check, "baseline")
 		if !(result.Skipped || result.SkippedDistro || result.SkippedMissing) || !strings.Contains(result.SkipReason, tc.want) {
 			t.Fatalf("missing skip reason: %+v", result)
 		}

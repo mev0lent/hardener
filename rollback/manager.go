@@ -185,7 +185,7 @@ func restoreEntry(entry config.DeltaEntry) error {
 		return nil
 	}
 
-	if current.exists && sha256Hex(current.content) == entry.Checksum {
+	if current.exists && current.digest() == entry.Checksum {
 		// Already in the pre-fix state: a repeated rollback, or a fix that
 		// only changed permissions. The original mode still needs restoring.
 		if err := RestorePermissions(path, fs.FileMode(entry.Perm)); err != nil {
@@ -249,7 +249,7 @@ func checkPostState(entry config.DeltaEntry, current fileState) error {
 	if !current.exists {
 		return fmt.Errorf("%s was removed after the fix; refusing to restore", entry.FilePath)
 	}
-	if got := sha256Hex(current.content); got != entry.PostChecksum {
+	if got := current.digest(); got != entry.PostChecksum {
 		return fmt.Errorf("%s changed after the fix (sha256 %s, fix left %s); refusing to overwrite",
 			entry.FilePath, got, entry.PostChecksum)
 	}
@@ -263,7 +263,7 @@ func verifyUnchanged(path string, expected fileState) error {
 	if err != nil {
 		return fmt.Errorf("re-read %s before writing: %w", path, err)
 	}
-	if now.exists != expected.exists || !bytes.Equal(now.content, expected.content) {
+	if now.exists != expected.exists || now.link != expected.link || !bytes.Equal(now.content, expected.content) {
 		return fmt.Errorf("%s changed while rollback was running; refusing to overwrite", path)
 	}
 	return nil
@@ -321,6 +321,13 @@ func writeRollbackTarget(entry config.DeltaEntry, data []byte, expected fileStat
 	if err := guard(); err != nil {
 		return err
 	}
+	if expected.link != "" {
+		// The rename above replaces a link; sudo tee and chmod would follow
+		// it, e.g. into /dev/null. Remove the link first.
+		if err := sudoRemove(entry.FilePath); err != nil {
+			return err
+		}
+	}
 	return WriteFileMaybeSudo(entry.FilePath, data, fs.FileMode(entry.Perm))
 }
 
@@ -328,13 +335,10 @@ func removeRollbackTarget(path string, expected fileState) error {
 	if err := verifyUnchanged(path, expected); err != nil {
 		return err
 	}
+	// os.Remove and rm delete a symlink itself, not its target.
 	err := os.Remove(path)
 	if errors.Is(err, os.ErrPermission) {
-		output, sudoErr := exec.Command("sudo", "rm", "-f", "--", path).CombinedOutput()
-		if sudoErr != nil {
-			return fmt.Errorf("sudo rm %s: %w (%s)", path, sudoErr, strings.TrimSpace(string(output)))
-		}
-		return nil
+		return sudoRemove(path)
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove %s: %w", path, err)
@@ -342,14 +346,34 @@ func removeRollbackTarget(path string, expected fileState) error {
 	return nil
 }
 
+func sudoRemove(path string) error {
+	output, err := exec.Command("sudo", "rm", "-f", "--", path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sudo rm %s: %w (%s)", path, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// restartSSHScript restarts whichever OpenSSH unit the system has. The unit
+// is sshd.service on RHEL, Fedora, openSUSE and Arch and ssh.service on
+// Debian and Ubuntu, where the sshd alias exists only while the unit is
+// enabled. try-restart leaves a stopped daemon stopped, so a rollback cannot
+// start an SSH server that was not running.
+const restartSSHScript = `for unit in sshd.service ssh.service; do
+	if systemctl cat "$unit" >/dev/null 2>&1; then exec systemctl try-restart "$unit"; fi
+done`
+
 func executePostRollbackHooks(entries []config.DeltaEntry) error {
-	var needsSysctl, needsSSH, needsAudit, needsReboot bool
+	var needsSysctl, needsSSH, needsAudit, needsReboot, needsSystemd bool
 	for _, entry := range entries {
 		path := entry.FilePath
 		needsSysctl = needsSysctl || strings.Contains(path, "sysctl")
 		needsSSH = needsSSH || strings.Contains(path, "ssh")
 		needsAudit = needsAudit || strings.Contains(path, "audit")
 		needsReboot = needsReboot || strings.Contains(path, "modprobe")
+		// Unit files and links, e.g. a mask that rollback removed, only take
+		// effect after a reload.
+		needsSystemd = needsSystemd || strings.Contains(path, "/systemd/")
 	}
 	needsReboot = needsReboot || needsSysctl
 	ui.PrintHeader("Synchronizing Live-State")
@@ -365,11 +389,14 @@ func executePostRollbackHooks(entries []config.DeltaEntry) error {
 	if needsSysctl && runtime.GOOS != "darwin" {
 		run("sysctl", "--system")
 	}
+	if needsSystemd && runtime.GOOS == "linux" {
+		run("systemctl", "daemon-reload")
+	}
 	if needsSSH {
 		if runtime.GOOS == "darwin" {
 			run("launchctl", "kickstart", "-k", "system/com.openssh.sshd")
 		} else {
-			run("systemctl", "restart", "ssh")
+			run("sh", "-c", restartSSHScript)
 		}
 	}
 	if needsAudit {

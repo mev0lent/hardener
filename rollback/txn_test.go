@@ -91,14 +91,34 @@ func TestFixThatTouchesNothingLeavesNoRecord(t *testing.T) {
 }
 
 // Issue #15: an unusable backup must be reported before the fix runs.
-func TestBeginFailsForUnbackupablePath(t *testing.T) {
+func TestBeginFailsWhenTheRecordCannotBeWritten(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "setting.conf")
+	os.WriteFile(file, []byte("x\n"), 0600)
+	history := filepath.Join(t.TempDir(), "not-a-directory")
+	os.WriteFile(history, nil, 0600)
+	ctx := &config.ExecContext{RunID: "test-run", BaseDir: history}
+	if _, err := Begin(ctx, config.Check{AffectedFile: file}); err == nil {
+		t.Fatal("expected Begin to fail when runs.json cannot be written")
+	}
+}
+
+// A directory cannot be restored, but must not block the fix either: checks
+// such as `chmod 0755 /var/log` name one as their affected_file.
+func TestBeginLeavesDirectoryUncovered(t *testing.T) {
 	ctx := newTestCtx(t)
 	dir := t.TempDir()
-	if _, err := Begin(ctx, config.Check{AffectedFile: dir}); err == nil {
-		t.Fatal("expected Begin to refuse a directory")
+	txn, err := Begin(ctx, config.Check{AffectedFile: dir})
+	if err != nil {
+		t.Fatalf("Begin refused a directory: %v", err)
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if txn.File() != "" {
+		t.Fatalf("directory reported as backed up: %q", txn.File())
 	}
 	if _, err := os.Stat(filepath.Join(ctx.BaseDir, "runs.json")); !os.IsNotExist(err) {
-		t.Fatalf("no record may be written for a failed backup: %v", err)
+		t.Fatalf("no record may be written for an uncovered path: %v", err)
 	}
 }
 

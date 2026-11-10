@@ -84,8 +84,13 @@ Before each fix, its `affected_file` and any live kernel values the check
 reads (`/proc/sys/...`, `sysctl -n/-w <key>`) are written to `runs.json`. If
 that backup fails, the fix is skipped. Rollback removes files a fix created,
 recreates files it deleted, and refuses to overwrite a file that changed
-after the fix. Not covered: package installs and removals, files named only
-in prose or by glob in `affected_file`, and `~/` paths.
+after the fix. A link the fix created, such as the `/dev/null` link of
+`systemctl mask`, is removed. Not covered: package installs and removals,
+directories, files named only in prose or by glob in `affected_file`, and
+`~/` paths. The fix still runs for these.
+
+`fix --dry-run` runs the audit and lists the fix each failing check would get,
+without applying any.
 
 ---
 
@@ -206,11 +211,12 @@ See [TUI.md](TUI.md) for keyboard controls, scoring, and terminal requirements.
 | `audit` / `fix` | `--ruleset <file>` | `-r` | Load checks from a ruleset YAML file |
 | `audit` / `fix` | `--path <dir>` | `-p` | Load checks from a hardening-guide directory (alternative to `--ruleset`) |
 | `audit` / `fix` | `--all` | `-A` | Skip interactive suite picker, run everything |
-| `audit` / `fix` | `--security-level <level>` | `-s` | `baseline` (default), `medium`, or `high` — runs checks at or below this level |
+| `audit` / `fix` | `--security-level <level>` | `-s` | `baseline` (default), `medium`, `high`, or `optional` — runs checks at or below this level |
 | `audit` / `fix` | `--profile <name>` | `-P` | Role profile for distro overrides (e.g. `server`, `client`) |
 | `audit` / `fix` | `--label <l1,l2>` | `-l` | Run only suites whose `labels:` list contains at least one match |
+| `fix` | `--dry-run` | `-d` | Audit and list the fix each failing check would get; nothing is applied |
 | `rollback` | `--latest` | | Roll back to the most recent fix run |
-| `rollback` | `--timestamp <ts>` | `-t` | Roll back to a specific run timestamp |
+| `rollback` | `--timestamp <ts>` | `-t` | Roll back to a specific run, by its UTC timestamp in `runs.json` (e.g. `2026-05-18T14:32:00Z`) |
 | `rollback` | `--files <f1,f2>` | | Roll back specific files only |
 | `audit` / `fix` | `--tui` | | Show the live terminal dashboard |
 | `tui-demo` | | | Preview the dashboard with simulated checks |
@@ -224,7 +230,15 @@ See [TUI.md](TUI.md) for keyboard controls, scoring, and terminal requirements.
 
 ### Security levels
 
-Every check has a `security_level` field (`baseline`, `medium`, `high`). Only checks at or below the level requested via `--security-level` are executed; the rest are reported as `skipped`. Default is `baseline`.
+Every check has a `security_level` field: `baseline`, `medium`, `high`, or `optional`, in that order. Only checks at or below the level requested via `--security-level` are executed; the rest are reported as `skipped`. Default is `baseline`.
+
+`optional` marks controls a hardening guide calls optional: recommended, but they may disable functionality a system needs. They are never included by `high`; `--security-level optional` runs every check, optional ones included.
+
+Levels are case-insensitive. An unknown `--security-level` is rejected, and checks whose `security_level` is missing or unknown are listed in a warning before the run, since they never run at any level.
+
+### Platform scope (`os`, `arch`)
+
+A suite's `os:` and `arch:` decide whether it runs on the current system; suites for another OS or architecture are skipped when the ruleset loads. A check can narrow this with its own `os:` and `arch:` lists, and is then reported as distro-skipped elsewhere. `amd64`/`x86_64` and `arm64`/`aarch64` are treated as the same architecture.
 
 ### Distro-specific overrides
 
@@ -349,6 +363,7 @@ Kernel sysctl checks in the bundled ruleset use `cat /proc/sys/<key>` rather tha
   ```
 - Use `requires_command` for optional binaries (`gsettings`, `auditctl`, `mokutil`) and `requires_file` for optional files (`/etc/hosts.allow`, `/etc/pam.d/common-auth`). Both produce a neutral "missing-command" state, not a failure.
 - For "should not be enabled" service checks, pass unless `systemctl is-enabled` returns exactly `enabled` — this treats `disabled`, `masked`, `static`, `indirect`, and missing units all as compliant.
+- A command that exits non-zero is reported as an error, not a failure. The exception is a counting grep (`grep -c`, `-ic`, `-Eci`, `-v -c`, `--count`, also `egrep`/`fgrep`) that prints `0`: grep exits 1 when nothing matches, and the `0` is compared against `expected` like any other output. For other tests, end the command with `&& echo 1 || echo 0` rather than relying on the exit code.
 
 ---
 
@@ -454,7 +469,7 @@ With a standalone ruleset YAML (`--binary` is required in this mode):
 | `--guide` | | Path to a hardening-guide directory of `.md` files |
 | `--ruleset` | | Path to a standalone `ruleset.yaml` (alternative to `--guide`) |
 | `--binary` | *(required with `--ruleset`)* | Path to the pre-built hardener binary |
-| `--level` | `baseline` | Security level: `baseline`, `medium`, or `high` |
+| `--level` | `baseline` | Security level: `baseline`, `medium`, `high`, or `optional` |
 | `--distros` | all | Space-separated list of distros to run |
 | `--profile` | | Passed as `--profile` to hardener (e.g. `server`, `client`) |
 | `--label` | | Passed as `--label` to hardener (e.g. `kernel,network`) |
@@ -496,7 +511,7 @@ Summary table columns:
 | `A1_DS` | Distro-skipped: check has a `distro:` map but current distro not listed (neutral) |
 | `A1_MC` | Missing-command: `requires_command` binary not found on this distro (neutral) |
 | `A1_T` | Total checks in suite |
-| `FX_OK / FX_F` | Fixes applied / still failing after fix |
+| `FX_OK / FX_F` | Fixes verified by re-check / still failing after the fix run, including fixes that ran but were not effective |
 | `A3_*` | Post-rollback audit: same columns as A1 |
 
 A healthy run has low `A1_F` and `A1_E`. `A1_S`, `A1_DS`, and `A1_MC` are all neutral — they are expected to vary by distro and security level and do not indicate broken checks.

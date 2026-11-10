@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"hardener/internal/config"
+	"hardener/internal/ui"
 )
 
 // fileState is what a path looked like at one point in time. A missing file
@@ -26,13 +27,42 @@ type fileState struct {
 	exists  bool
 	content []byte
 	perm    fs.FileMode
+	// link is the target of a symlink that does not lead to a regular file,
+	// such as the /dev/null link `systemctl mask` creates. content is empty;
+	// rollback removes or replaces the link itself, never writes through it.
+	link string
+}
+
+// digest identifies a state in the checksum fields of a record. A link
+// hashes its target with a prefix, so it never equals a file's content hash.
+func (s fileState) digest() string {
+	if s.link != "" {
+		return sha256Hex([]byte("symlink\x00" + s.link))
+	}
+	return sha256Hex(s.content)
 }
 
 func sha256Hex(data []byte) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
+// errNotRegular marks a path rollback cannot restore: a directory, a device
+// or another non-regular file.
+var errNotRegular = errors.New("not a regular file")
+
 func captureFile(path string) (fileState, error) {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		target, statErr := os.Stat(path)
+		if errors.Is(statErr, os.ErrNotExist) || (statErr == nil && !target.Mode().IsRegular()) {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return fileState{}, fmt.Errorf("read symlink %s: %w", path, err)
+			}
+			return fileState{exists: true, link: link}, nil
+		}
+		// A link to a regular file is backed up by the content it leads to.
+	}
+
 	var perm fs.FileMode
 	info, err := os.Stat(path)
 	switch {
@@ -49,14 +79,14 @@ func captureFile(path string) (fileState, error) {
 			return fileState{}, nil
 		}
 		if !regular {
-			return fileState{}, fmt.Errorf("backup path %s is not a regular file", path)
+			return fileState{}, fmt.Errorf("backup path %s: %w", path, errNotRegular)
 		}
 		perm = sudoPerm
 	case err != nil:
 		return fileState{}, fmt.Errorf("stat backup file %s: %w", path, err)
 	default:
 		if !info.Mode().IsRegular() {
-			return fileState{}, fmt.Errorf("backup path %s is not a regular file", path)
+			return fileState{}, fmt.Errorf("backup path %s: %w", path, errNotRegular)
 		}
 		perm = info.Mode() & backupModeMask
 	}
@@ -138,20 +168,27 @@ func Begin(ctx *config.ExecContext, check config.Check) (*Txn, error) {
 
 	if isBackupPath(check.AffectedFile) {
 		pre, err := captureFile(check.AffectedFile)
-		if err != nil {
+		switch {
+		case errors.Is(err, errNotRegular) || (err == nil && pre.link != ""):
+			// Rollback restores regular files. A directory or a special link
+			// is not covered, like a path given in prose. Refusing the fix
+			// instead made checks such as `chmod 0755 /var/log` unfixable.
+			ui.PrintInfo(fmt.Sprintf("Rollback does not cover %s: not a regular file", check.AffectedFile))
+		case err != nil:
 			return nil, fmt.Errorf("back up %s: %w", check.AffectedFile, err)
+		default:
+			t.file, t.fileID, t.pre = check.AffectedFile, uuid.NewString(), pre
+			entry := base
+			entry.ID = t.fileID
+			entry.FilePath = t.file
+			entry.Perm = uint32(pre.perm & backupModeMask)
+			entry.Created = !pre.exists
+			if pre.exists {
+				entry.Checksum = sha256Hex(pre.content)
+				entry.Before = base64.StdEncoding.EncodeToString(pre.content)
+			}
+			entries = append(entries, entry)
 		}
-		t.file, t.fileID, t.pre = check.AffectedFile, uuid.NewString(), pre
-		entry := base
-		entry.ID = t.fileID
-		entry.FilePath = t.file
-		entry.Perm = uint32(pre.perm & backupModeMask)
-		entry.Created = !pre.exists
-		if pre.exists {
-			entry.Checksum = sha256Hex(pre.content)
-			entry.Before = base64.StdEncoding.EncodeToString(pre.content)
-		}
-		entries = append(entries, entry)
 	}
 
 	for _, path := range kernelPaths(check) {
@@ -262,7 +299,7 @@ func completeFileEntry(pre, post fileState) *config.DeltaEntry {
 		return &config.DeltaEntry{
 			Created:      true,
 			Perm:         uint32(post.perm & backupModeMask),
-			PostChecksum: sha256Hex(post.content),
+			PostChecksum: post.digest(),
 		}
 	case !post.exists:
 		delta, checksum := ComputeDelta("", string(pre.content))
@@ -273,12 +310,13 @@ func completeFileEntry(pre, post fileState) *config.DeltaEntry {
 			Perm:     uint32(pre.perm & backupModeMask),
 		}
 	default:
+		// A post-fix link has no content, so the delta rebuilds the file.
 		delta, checksum := ComputeDelta(string(post.content), string(pre.content))
 		return &config.DeltaEntry{
 			Delta:        delta,
 			Checksum:     checksum,
 			Perm:         uint32(pre.perm & backupModeMask),
-			PostChecksum: sha256Hex(post.content),
+			PostChecksum: post.digest(),
 		}
 	}
 }
